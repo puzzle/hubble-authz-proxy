@@ -41,7 +41,10 @@ LABEL org.opencontainers.image.title="hubble-authz-proxy" \
 
 COPY --from=build /out/hubble-authz-proxy /usr/local/bin/hubble-authz-proxy
 
-USER nonroot:nonroot
+# Numeric, not the "nonroot" name the base image declares: kubelet cannot verify
+# a non-numeric user against runAsNonRoot and refuses to start the container
+# with CreateContainerConfigError. 65532 is distroless's nonroot uid.
+USER 65532:65532
 EXPOSE 8090
 
 ENTRYPOINT ["/usr/local/bin/hubble-authz-proxy"]

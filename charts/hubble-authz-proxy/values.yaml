@@ -3,7 +3,7 @@ replicaCount: 1
 image:
   repository: ghcr.io/splattner/hubble-authz-proxy
   pullPolicy: IfNotPresent
-  # Defaults to .Chart.AppVersion.
+  # Defaults to v<appVersion>, matching the published tags.
   tag: ""
 
 imagePullSecrets: []
@@ -154,6 +154,11 @@ podLabels: {}
 
 podSecurityContext:
   runAsNonRoot: true
+  # Must be numeric. The image declares its user by name, and kubelet cannot
+  # verify a name against runAsNonRoot — it fails with
+  # CreateContainerConfigError. 65532 is the uid of distroless's nonroot user.
+  runAsUser: 65532
+  runAsGroup: 65532
   seccompProfile:
     type: RuntimeDefault
 
