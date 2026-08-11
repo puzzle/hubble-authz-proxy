@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/splattner/hubble-authz-proxy/compare/v0.2.0...v0.3.0) (2026-08-11)
+
+
+### Features
+
+* **chart:** optionally deploy Hubble UI with the proxy as a sidecar ([213d7d7](https://github.com/splattner/hubble-authz-proxy/commit/213d7d7c5228df0f48fc17f56709a9be8e2e8782))
+
 ## [0.2.0](https://github.com/splattner/hubble-authz-proxy/compare/v0.1.1...v0.2.0) (2026-08-11)
 
 
