@@ -95,8 +95,9 @@ func TestRBACResolvesAllowedNamespaces(t *testing.T) {
 	if len(scope.Namespaces) != 1 || !scope.Namespaces["payments"] {
 		t.Errorf("scope = %v, want {payments}", scope.Namespaces)
 	}
-	if got := fc.sars.Load(); got != 3 {
-		t.Errorf("issued %d reviews, want one per namespace (3)", got)
+	// One cluster-scoped probe, then one review per namespace.
+	if got := fc.sars.Load(); got != 1+3 {
+		t.Errorf("issued %d reviews, want 1 cluster-scoped + 3 namespaced", got)
 	}
 }
 
@@ -108,8 +109,8 @@ func TestRBACCachesByIdentity(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := fc.sars.Load(); got != 2 {
-		t.Errorf("issued %d reviews across 5 calls, want 2 (one sweep, then cached)", got)
+	if got := fc.sars.Load(); got != 1+2 {
+		t.Errorf("issued %d reviews across 5 calls, want 3 (one sweep, then cached)", got)
 	}
 }
 
@@ -147,8 +148,8 @@ func TestRBACSingleflightCollapsesConcurrentMisses(t *testing.T) {
 			t.Fatalf("caller %d: %v", i, err)
 		}
 	}
-	if got := fc.sars.Load(); got != namespaces {
-		t.Errorf("issued %d reviews for 20 concurrent callers, want %d (a single sweep)", got, namespaces)
+	if got := fc.sars.Load(); got != 1+namespaces {
+		t.Errorf("issued %d reviews for 20 concurrent callers, want %d (a single sweep)", got, 1+namespaces)
 	}
 }
 
@@ -251,5 +252,40 @@ func TestRBACCacheKeyIgnoresGroupOrder(t *testing.T) {
 	d := Identity{User: "bob@example.com"}
 	if cacheKey(c) == cacheKey(d) {
 		t.Error("cacheKey collided across user and email fields")
+	}
+}
+
+// A caller who may list pods cluster-wide needs no filtering, so one review
+// should answer it instead of sweeping every namespace — on a large cluster the
+// admins are otherwise the most expensive users to resolve.
+func TestRBACClusterWideShortCircuits(t *testing.T) {
+	// metav1.NamespaceAll is "", so allowing that means "in every namespace".
+	fc := newFakeCluster(t,
+		[]string{"payments", "search", "kube-system"},
+		[]string{""}, time.Minute)
+
+	scope, err := fc.authz.AllowedNamespaces(context.Background(), testIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !scope.All {
+		t.Fatalf("cluster-wide caller got a scoped result: %v", scope.Namespaces)
+	}
+	if got := fc.sars.Load(); got != 1 {
+		t.Errorf("issued %d reviews, want 1 — the per-namespace sweep should be skipped", got)
+	}
+}
+
+// Scope{All} must not be a frozen snapshot: an unrestricted caller keeps seeing
+// namespaces created after their cache entry was written.
+func TestRBACClusterWideScopeHasNoNamespaceSnapshot(t *testing.T) {
+	fc := newFakeCluster(t, []string{"payments"}, []string{""}, time.Minute)
+
+	scope, err := fc.authz.AllowedNamespaces(context.Background(), testIdentity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scope.Namespaces) != 0 {
+		t.Errorf("enumerated %v alongside All; filtering is skipped so this is dead state", scope.Namespaces)
 	}
 }

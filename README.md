@@ -257,7 +257,9 @@ rolls the Deployment when the ConfigMap changes.
 pods` there, via `SubjectAccessReview`. Tracks real `kubectl` access with no
 mapping to maintain.
 
-A resolution costs one review per namespace, so three things guard it:
+A caller who may list pods **cluster-wide** costs exactly one review — they get
+unrestricted scope and filtering is skipped entirely. Everyone else needs one
+review per namespace, so three things guard that:
 
 - results are cached per identity for `authz.cacheTTL` (the cache is bounded and
   swept, since its keys come from caller-supplied headers);
@@ -269,6 +271,18 @@ A resolution costs one review per namespace, so three things guard it:
 If any single review fails, the whole resolution fails. A partial answer would
 look like a smaller namespace set — an under-show that then gets cached — so it
 errors instead, and failures are never cached.
+
+**Sizing.** Steady-state load is `active users × namespaces` reviews per
+`authz.cacheTTL`. On a cluster with a few hundred namespaces the 60s default is
+the wrong end of the trade — raise `authz.cacheTTL` to `5m` or more, which cuts
+the rate proportionally and costs you up to that long to notice revoked access.
+Watch `hubble_authz_subjectaccessreviews_total` and
+`hubble_authz_scope_cache_total{result="miss"}` to see what it actually costs
+you before tuning further.
+
+Note that `rbac` mode grants what `list pods` grants. If a team can read pods in
+a namespace they can see its flows — usually what you want, but check it matches
+your intent before assuming it is stricter than a static mapping.
 
 ### Cross-namespace visibility
 

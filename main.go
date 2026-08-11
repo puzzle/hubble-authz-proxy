@@ -43,6 +43,7 @@ func main() {
 		mode          = flag.String("authz", "static", "authorization backend: static | rbac")
 		mapFile       = flag.String("authz-config", "/etc/hubble-authz/mapping.yaml", "static mode: group/user -> namespace mapping")
 		rbacTTL       = flag.Duration("rbac-ttl", 60*time.Second, "rbac mode: cache TTL for a caller's resolved namespace set")
+		rbacWorkers   = flag.Int("rbac-concurrency", 16, "rbac mode: SubjectAccessReviews issued in parallel per resolution")
 		channelTTL    = flag.Duration("channel-ttl", 10*time.Minute, "how long to keep per-channel service-map state after a client goes idle")
 		reqBoth       = flag.Bool("require-both-endpoints", false, "only show traffic when BOTH endpoints are in allowed namespaces (stricter)")
 		shutdownGrace = flag.Duration("shutdown-timeout", 20*time.Second, "how long to let in-flight requests finish after SIGTERM")
@@ -70,7 +71,7 @@ func main() {
 		authz, err = NewStaticAuthorizer(*mapFile)
 	case "rbac":
 		var rbacAuthz *RBACAuthorizer
-		rbacAuthz, err = NewRBACAuthorizer(*rbacTTL)
+		rbacAuthz, err = NewRBACAuthorizer(*rbacTTL, *rbacWorkers)
 		if err == nil {
 			go rbacAuthz.RunSweeper(ctx)
 			authz = rbacAuthz

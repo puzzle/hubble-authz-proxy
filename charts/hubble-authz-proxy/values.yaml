@@ -75,7 +75,15 @@ authz:
   mode: static
 
   # Used when mode=rbac.
+  #
+  # Cost is (active users x namespaces) SubjectAccessReviews per cacheTTL, so on
+  # a cluster with many namespaces raise this — 5m cuts the load fivefold at the
+  # price of taking up to 5m to notice revoked access. Callers who may list pods
+  # cluster-wide cost one review regardless.
   cacheTTL: 60s
+  # Reviews issued in parallel per resolution. Latency is roughly
+  # namespaces/concurrency round trips.
+  concurrency: 16
 
   # Used when mode=static. Rendered into a ConfigMap and mounted at
   # /etc/hubble-authz/mapping.yaml.

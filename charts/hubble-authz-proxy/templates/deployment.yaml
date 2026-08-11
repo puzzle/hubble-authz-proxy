@@ -52,6 +52,7 @@ spec:
             - --authz-config=/etc/hubble-authz/mapping.yaml
             {{- else }}
             - --rbac-ttl={{ .Values.authz.cacheTTL }}
+            - --rbac-concurrency={{ .Values.authz.concurrency }}
             {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}

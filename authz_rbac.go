@@ -58,7 +58,7 @@ type cachedScope struct {
 	expires time.Time
 }
 
-func NewRBACAuthorizer(ttl time.Duration) (*RBACAuthorizer, error) {
+func NewRBACAuthorizer(ttl time.Duration, concurrency int) (*RBACAuthorizer, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, err
@@ -67,7 +67,11 @@ func NewRBACAuthorizer(ttl time.Duration) (*RBACAuthorizer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return newRBACAuthorizer(kc, ttl), nil
+	a := newRBACAuthorizer(kc, ttl)
+	if concurrency > 0 {
+		a.concurrency = concurrency
+	}
+	return a, nil
 }
 
 func newRBACAuthorizer(kc kubernetes.Interface, ttl time.Duration) *RBACAuthorizer {
@@ -117,6 +121,22 @@ func (a *RBACAuthorizer) AllowedNamespaces(ctx context.Context, id Identity) (Sc
 }
 
 func (a *RBACAuthorizer) resolve(ctx context.Context, id Identity) (Scope, error) {
+	// Ask the cluster-scoped question first. A caller who may list pods in every
+	// namespace needs no filtering at all, so this collapses the whole sweep into
+	// one review — and on a large cluster the admins are exactly the users who
+	// would otherwise be most expensive to resolve.
+	//
+	// It is also more correct than enumerating: an unrestricted caller gets
+	// Scope{All: true} and keeps seeing namespaces created after their entry was
+	// cached, rather than a snapshot frozen at resolution time.
+	all, err := a.canListPods(ctx, id, metav1.NamespaceAll)
+	if err != nil {
+		return Scope{}, err
+	}
+	if all {
+		return Scope{All: true}, nil
+	}
+
 	nsList, err := a.kc.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return Scope{}, err
