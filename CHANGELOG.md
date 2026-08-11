@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.2.0](https://github.com/splattner/hubble-authz-proxy/compare/v0.1.1...v0.2.0) (2026-08-11)
+
+
+### Features
+
+* show services linked to the caller's scope ([6c27232](https://github.com/splattner/hubble-authz-proxy/commit/6c2723235d6a211503bd3669e8ecc330b307dd98))
+
+
+### Bug Fixes
+
+* make the released chart installable as-is ([2914d09](https://github.com/splattner/hubble-authz-proxy/commit/2914d09e645769cdbad32e04e33e95a04d3e09b1))
+
 ## [0.1.1](https://github.com/splattner/hubble-authz-proxy/compare/v0.1.0...v0.1.1) (2026-08-11)
 
 
