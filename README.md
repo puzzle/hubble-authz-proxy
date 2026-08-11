@@ -364,6 +364,17 @@ dropping them — otherwise every rollout surfaces as errors in the browser. Kee
 
 ## Known limitations
 
+**A scope change does not update an open session's namespace picker.** The
+backend sends the namespace list once per channel, roughly half a second after
+the client connects, and then only when namespaces themselves change — the
+recurring traffic is node status. So if you shrink a user's mapping while they
+have the UI open, their picker keeps showing the old list until they reload.
+
+This fails safe rather than open: the picker is just a list of names, and
+selecting one of those stale namespaces yields nothing, because service-map
+responses are filtered per message against the caller's current scope. Only the
+list is stale, never the data.
+
 **Node status is not filtered.** The first `control-stream` message is a
 `Notification` carrying `GetStatusResponse`, which every authenticated user sees
 in full regardless of namespace scope:
