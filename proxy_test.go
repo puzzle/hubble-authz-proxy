@@ -43,7 +43,7 @@ func newStack(t *testing.T, authz Authorizer, requireBoth bool, msg *cppb.Messag
 		} else {
 			w.Header().Set("Content-Type", "application/octet-stream")
 		}
-		w.Write(body)
+		_, _ = w.Write(body)
 	}))
 	t.Cleanup(backend.Close)
 
@@ -69,7 +69,7 @@ func post(t *testing.T, srv *httptest.Server, path string, headers map[string]st
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { resp.Body.Close() })
+	t.Cleanup(func() { _ = resp.Body.Close() })
 	return resp
 }
 
@@ -259,7 +259,7 @@ func TestEndToEndNotReadyPollPassesThrough(t *testing.T) {
 // without requiring identity, so health checks keep working.
 func TestNonAPIPathsPassThrough(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	}))
 	t.Cleanup(backend.Close)
 	u, _ := url.Parse(backend.URL)

@@ -145,7 +145,7 @@ func (p *Proxy) filterResponse(resp *http.Response) error {
 	if err != nil {
 		return err
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	msg, err := decodeEnvelope(raw, isJSON)
 	if err != nil {

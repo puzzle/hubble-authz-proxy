@@ -7,3 +7,18 @@ linters:
     - misspell
     - revive
     - unconvert
+
+  settings:
+    misspell:
+      ignore-rules:
+        # Spelled with one 'r' in hubble-ui's ui.proto (bytes_transfered).
+        # Comments quoting the field must match it, not English.
+        - transfered
+
+  exclusions:
+    rules:
+      # Test helpers close response bodies via t.Cleanup, which bodyclose
+      # cannot trace through, so every call through a helper is a false report.
+      - path: _test\.go
+        linters:
+          - bodyclose
