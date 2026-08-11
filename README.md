@@ -47,7 +47,7 @@ The backend serves two routes, both carrying protobuf payloads inside a
 | Route | Payload | Treatment |
 | --- | --- | --- |
 | `control-stream` | `NamespaceState` | Only namespaces in scope, so the picker can't enumerate the cluster |
-| `control-stream` | `Notification` | Passed through — relay/k8s connection state is cluster-wide |
+| `control-stream` | `Notification` | Passed through — cluster-wide status, but see [Known limitations](#known-limitations) |
 | `service-map-stream` | `Flow`, `Flows` | Dropped unless an endpoint is in scope |
 | `service-map-stream` | `ServiceState` | Dropped unless `service.namespace` is in scope |
 | `service-map-stream` | `ServiceLinkState` | Both endpoint services resolved to namespaces, then the same rule |
@@ -349,6 +349,22 @@ dropping them — otherwise every rollout surfaces as errors in the browser. Kee
 ---
 
 ## Known limitations
+
+**Node status is not filtered.** The first `control-stream` message is a
+`Notification` carrying `GetStatusResponse`, which every authenticated user sees
+in full regardless of namespace scope:
+
+```text
+nodes[]:      name, address (IP:port), cilium version, TLS server name,
+              uptime, numFlows / maxFlows / seenFlows
+serverStatus: relay version, flowsRate, seenFlows, connected node count
+```
+
+That is an infrastructure inventory — node hostnames, your internal addressing
+and naming convention, and an exact Cilium version. It is namespace-independent,
+which is why it passes through, and the UI's status header needs it. If your
+tenants should not see it, this needs redacting; there is no namespace-scoped
+version of the node list to substitute.
 
 **Aggregate counters leak coarse information.** The backend aggregates the
 service map *before* the proxy filters it, so `flow_amount`, `bytes_transfered`
