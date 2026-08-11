@@ -392,16 +392,31 @@ Testing against a real cluster without deploying:
 kubectl port-forward -n kube-system deploy/hubble-ui 8091:8090
 go run . --backend=http://127.0.0.1:8091 --authz-config=./mapping.example.yaml
 
-curl -s localhost:8090/api/control-stream \
-  -H 'Content-Type: application/octet-stream' \
+curl -i -X POST localhost:8090/api/control-stream \
+  -H 'Content-Type: application/json' \
   -H 'X-Auth-Request-Email: bob@example.com' \
   -H 'X-Auth-Request-Groups: team-payments' \
-  --data-binary @request.bin | xxd | head
+  -d '{"meta":{"route_name":"control-stream"}}'
 ```
 
-Swap the identity headers between users and confirm the namespace list and
-service map change accordingly — and that a user cannot widen scope through UI
-filters.
+> **The URL path is decorative.** The backend dispatches on `meta.route_name`
+> from the request *body*; `/api/:RouteName` matches any segment and the captured
+> value is never read. A request with no body — or with `routeName` instead of
+> `route_name` — resolves to an empty route and returns **404**, which looks
+> exactly like a missing endpoint. The envelope is plain `encoding/json` over the
+> generated struct, not protojson, so the field really is snake_case.
+>
+> Telling the two 404s apart: the backend router writes an empty body
+> (`Content-Length: 0`); an nginx or ingress 404 returns an HTML page.
+
+Swap the identity headers between users and confirm the namespace list changes
+accordingly — and that a user cannot widen scope through UI filters. Without
+identity headers you get **401**, not 404.
+
+`service-map-stream` is harder to drive by hand: its first message must carry a
+`ui.GetEventsRequest` with non-empty `event_types` in `body.content` as base64
+protobuf, or the backend terminates the channel with 400. Confirm the path with
+`control-stream` first.
 
 ## Contributing
 
