@@ -1,0 +1,39 @@
+name: E2E
+
+# Runs the proxy against the real hubble-ui backend container. Kept out of
+# PR Quality because it pulls an image and takes minutes, while the rest of the
+# suite is seconds and needs no Docker.
+on:
+    pull_request:
+        branches: [main]
+    push:
+        branches: [main]
+    schedule:
+        # The backend image is pinned, but this also exercises our reading of an
+        # internal protocol; a nightly run surfaces breakage before a release.
+        - cron: "0 3 * * *"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    e2e:
+        name: End-to-end against real hubble-ui backend
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Setup Go
+              uses: actions/setup-go@v6
+              with:
+                  go-version-file: go.mod
+                  cache: true
+
+            - name: Pre-pull backend image
+              run: docker pull quay.io/cilium/hubble-ui-backend:v0.13.3
+
+            - name: Run e2e suite
+              run: go test -tags e2e -count=1 -run TestE2E -v ./...
