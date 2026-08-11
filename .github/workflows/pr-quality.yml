@@ -3,6 +3,12 @@ name: PR Quality
 on:
     pull_request:
         branches: [main]
+    # Also verify main directly. Release Please updates its release PR using
+    # GITHUB_TOKEN, and GitHub does not create workflow runs for events raised
+    # by that token, so the release PR never picks up a fresh pull_request run.
+    # Without this, a release could be cut against a stale check.
+    push:
+        branches: [main]
 
 permissions:
     contents: read
