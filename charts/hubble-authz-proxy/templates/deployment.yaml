@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "hubble-authz-proxy.fullname" . }}
+  labels:
+    {{- include "hubble-authz-proxy.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "hubble-authz-proxy.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        {{- if and .Values.authz.checksumAnnotation (eq .Values.authz.mode "static") (not .Values.authz.existingConfigMap) }}
+        {{/* The proxy reads the mapping once at startup, so a ConfigMap edit
+             alone would not take effect. This rolls the pods instead. */}}
+        checksum/mapping: {{ include (print $.Template.BasePath "/configmap-mapping.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      labels:
+        {{- include "hubble-authz-proxy.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "hubble-authz-proxy.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: hubble-authz-proxy
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            - --listen={{ .Values.proxy.listen }}
+            - --backend={{ include "hubble-authz-proxy.backendURL" . }}
+            - --api-prefix={{ .Values.proxy.apiPrefix }}
+            - --authz={{ .Values.authz.mode }}
+            - --require-both-endpoints={{ .Values.proxy.requireBothEndpoints }}
+            - --channel-ttl={{ .Values.proxy.channelTTL }}
+            {{- if eq .Values.authz.mode "static" }}
+            - --authz-config=/etc/hubble-authz/mapping.yaml
+            {{- else }}
+            - --rbac-ttl={{ .Values.authz.cacheTTL }}
+            {{- end }}
+            {{- with .Values.extraArgs }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          {{- with .Values.extraEnv }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+              protocol: TCP
+          {{- with .Values.livenessProbe }}
+          livenessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with .Values.readinessProbe }}
+          readinessProbe:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- if eq .Values.authz.mode "static" }}
+          volumeMounts:
+            - name: mapping
+              mountPath: /etc/hubble-authz
+              readOnly: true
+          {{- end }}
+      {{- if eq .Values.authz.mode "static" }}
+      volumes:
+        - name: mapping
+          configMap:
+            name: {{ include "hubble-authz-proxy.mappingConfigMapName" . }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

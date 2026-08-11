@@ -1,0 +1,20 @@
+# Mounted at /etc/hubble-authz/mapping.yaml (e.g. from a ConfigMap).
+# Used only in -authz=static mode.
+
+# Users (by -user or -email) or OIDC groups that see everything, unfiltered.
+admins:
+  - platform-admins
+  - alice@example.com
+
+# OIDC group -> namespaces that group may observe.
+groupToNamespaces:
+  team-payments:
+    - payments
+    - payments-staging
+  team-search:
+    - search
+
+# Individual user -> namespaces (keyed by user or email).
+userToNamespaces:
+  bob@example.com:
+    - sandbox-bob

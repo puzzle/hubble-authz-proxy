@@ -1,0 +1,6 @@
+owner: splattner
+git-repo: hubble-authz-proxy
+package-path: .cr-release-packages
+pages-branch: gh-pages
+pages-index-path: index.yaml
+release-name-template: "chart-{{ .Name }}-{{ .Version }}"

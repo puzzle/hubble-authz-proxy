@@ -1,0 +1,32 @@
+{{- if .Values.networkPolicy.enabled }}
+{{/*
+The proxy trusts the X-Auth-Request-* headers on every request it receives, so
+reachability IS the authentication boundary. Without this policy, any pod that
+can route to the proxy can set those headers itself and read any namespace.
+*/}}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "hubble-authz-proxy.fullname" . }}
+  labels:
+    {{- include "hubble-authz-proxy.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "hubble-authz-proxy.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    {{- if .Values.networkPolicy.ingressFrom }}
+    - from:
+        {{- toYaml .Values.networkPolicy.ingressFrom | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.service.port }}
+    {{- else }}
+    {{- /* An empty ingress list denies all inbound traffic. That is the safe
+           default for a misconfiguration, but it also means nothing can reach
+           the proxy — set networkPolicy.ingressFrom. */}}
+    []
+    {{- end }}
+{{- end }}

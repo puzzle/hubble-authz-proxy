@@ -1,0 +1,12 @@
+# Build output
+/hubble-authz-proxy
+/dist/
+/.cr-release-packages/
+
+# Helm
+*.tgz
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/

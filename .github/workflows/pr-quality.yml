@@ -1,0 +1,103 @@
+name: PR Quality
+
+on:
+    pull_request:
+        branches: [main]
+
+permissions:
+    contents: read
+
+jobs:
+    go-build-test:
+        name: Go build, vet and test
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Setup Go
+              uses: actions/setup-go@v6
+              with:
+                  go-version-file: go.mod
+                  cache: true
+
+            - name: Verify gofmt
+              run: |
+                  unformatted="$(gofmt -l .)"
+                  if [ -n "$unformatted" ]; then
+                      echo "These files need gofmt:"
+                      echo "$unformatted"
+                      exit 1
+                  fi
+
+            - name: Verify go.mod is tidy
+              run: |
+                  go mod tidy
+                  git diff --exit-code -- go.mod go.sum
+
+            - name: Vet
+              run: go vet ./...
+
+            - name: Test
+              run: go test -race -count=1 ./...
+
+    golangci-lint:
+        name: golangci-lint
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Setup Go
+              uses: actions/setup-go@v6
+              with:
+                  go-version-file: go.mod
+                  cache: true
+
+            - name: Run golangci-lint
+              uses: golangci/golangci-lint-action@v9
+              with:
+                  version: latest
+
+    docker-build:
+        name: Docker build
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v4
+
+            - name: Build image (no push)
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  file: Dockerfile
+                  push: false
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+    helm-lint-template:
+        name: Helm lint and template
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Setup Helm
+              uses: azure/setup-helm@v5
+
+            - name: Lint chart
+              run: helm lint ./charts/hubble-authz-proxy
+
+            - name: Render chart (static authz)
+              run: helm template hap ./charts/hubble-authz-proxy > /tmp/render-static.yaml
+
+            - name: Render chart (rbac authz, NetworkPolicy on)
+              run: |
+                  helm template hap ./charts/hubble-authz-proxy \
+                    --set authz.mode=rbac \
+                    --set networkPolicy.enabled=true \
+                    --set 'networkPolicy.ingressFrom[0].podSelector.matchLabels.k8s-app=hubble-ui' \
+                    > /tmp/render-rbac.yaml

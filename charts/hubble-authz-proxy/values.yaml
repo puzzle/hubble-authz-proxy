@@ -1,0 +1,154 @@
+replicaCount: 1
+
+image:
+  repository: ghcr.io/splattner/hubble-authz-proxy
+  pullPolicy: IfNotPresent
+  # Defaults to .Chart.AppVersion.
+  tag: ""
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# -- Where the unmodified hubble-ui backend can be reached.
+#
+# In Cilium's default install the backend is a sidecar in the hubble-ui pod
+# listening on 127.0.0.1:8090, so it has no Service of its own. Enable
+# backendService below to create one that selects that pod, or point `url` at a
+# Service you manage yourself.
+backend:
+  url: ""
+  service:
+    create: true
+    name: ""
+    # Selector for the pod running the hubble-ui backend container.
+    selector:
+      k8s-app: hubble-ui
+    port: 8090
+    targetPort: 8090
+    # Namespace the hubble-ui pod runs in. A Service can only select pods in its
+    # own namespace, so this must match where you install the chart.
+    namespace: ""
+
+proxy:
+  # -- Address the proxy listens on.
+  listen: ":8090"
+  # -- Path prefix carrying backend routes; anything else is passed through
+  # unfiltered and without requiring an identity (health checks, assets).
+  apiPrefix: "/api"
+  # -- When true, a flow or service-map edge is shown only if BOTH endpoints are
+  # in an allowed namespace. When false (default), either endpoint suffices,
+  # which lets a user see what their namespace talks to but reveals the peer's
+  # namespace name.
+  requireBothEndpoints: false
+  # -- How long per-channel service-map state is kept after a client goes idle.
+  channelTTL: 10m
+
+authz:
+  # -- static | rbac
+  #
+  # static: map OIDC groups/users to namespaces with the mapping below.
+  # rbac:   ask the API server, per namespace, whether the caller may list pods
+  #         there. Tracks real kubectl access; costs one SubjectAccessReview per
+  #         namespace on a cache miss.
+  mode: static
+
+  # Used when mode=rbac.
+  cacheTTL: 60s
+
+  # Used when mode=static. Rendered into a ConfigMap and mounted at
+  # /etc/hubble-authz/mapping.yaml.
+  #
+  # NOTE: the proxy reads this file once at startup, so changing it requires a
+  # pod restart. Enable checksumAnnotation to have Helm roll the Deployment
+  # automatically when the mapping changes.
+  mapping:
+    admins: []
+    #  - platform-admins
+    #  - alice@example.com
+    groupToNamespaces: {}
+    #  team-payments:
+    #    - payments
+    #    - payments-staging
+    userToNamespaces: {}
+    #  bob@example.com:
+    #    - sandbox-bob
+
+  # -- Mount an existing ConfigMap instead of rendering `mapping` above. The key
+  # must be "mapping.yaml".
+  existingConfigMap: ""
+
+  # -- Roll the Deployment when the mapping ConfigMap changes.
+  checksumAnnotation: true
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+rbac:
+  # -- Create the ClusterRole/Binding the rbac authorizer needs
+  # (create subjectaccessreviews, list namespaces). Ignored when
+  # authz.mode is static.
+  create: true
+
+service:
+  type: ClusterIP
+  port: 8090
+  annotations: {}
+
+# -- Restrict who may reach the proxy.
+#
+# This is load-bearing, not optional hardening: the proxy TRUSTS the
+# X-Auth-Request-* headers on every request. Anything that can reach it directly
+# can claim to be any user. Only the pod terminating authentication should be
+# allowed in.
+networkPolicy:
+  enabled: false
+  # Pods allowed to reach the proxy (typically oauth2-proxy, or the hubble-ui
+  # frontend if oauth2-proxy runs as its sidecar).
+  ingressFrom: []
+  #  - podSelector:
+  #      matchLabels:
+  #        k8s-app: hubble-ui
+
+podAnnotations: {}
+podLabels: {}
+
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 256Mi
+
+livenessProbe:
+  tcpSocket:
+    port: http
+  initialDelaySeconds: 5
+  periodSeconds: 20
+
+readinessProbe:
+  tcpSocket:
+    port: http
+  initialDelaySeconds: 2
+  periodSeconds: 10
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+extraArgs: []
+extraEnv: []

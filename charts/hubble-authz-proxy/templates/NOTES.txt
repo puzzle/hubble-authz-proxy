@@ -1,0 +1,38 @@
+hubble-authz-proxy {{ .Chart.AppVersion }} is installed as:
+
+    {{ include "hubble-authz-proxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+
+Upstream backend: {{ include "hubble-authz-proxy.backendURL" . }}
+Authorization:    {{ .Values.authz.mode }}{{ if eq .Values.authz.mode "static" }} ({{ len .Values.authz.mapping.groupToNamespaces }} group mappings, {{ len .Values.authz.mapping.admins }} admins){{ end }}
+Cross-namespace:  {{ if .Values.proxy.requireBothEndpoints }}strict (both endpoints must be in scope){{ else }}lenient (either endpoint suffices){{ end }}
+
+Installing the chart does NOT put the proxy in the data path on its own. Two
+steps remain:
+
+1. Repoint the hubble-ui frontend's /api at this Service.
+
+   Cilium renders the frontend's nginx.conf into the "hubble-ui-nginx" ConfigMap
+   with "proxy_pass http://127.0.0.1:8090;". Replace that with:
+
+       proxy_pass http://{{ include "hubble-authz-proxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }};
+
+   then restart the hubble-ui Deployment. Note that a Cilium chart upgrade
+   rewrites that ConfigMap, so this needs to be reapplied (or managed with a
+   Helm post-renderer).
+
+2. Put oauth2-proxy in front of the frontend so X-Auth-Request-* headers exist,
+   and make sure it STRIPS any inbound copies of those headers from the client.
+
+{{ if not .Values.networkPolicy.enabled }}
+WARNING: networkPolicy.enabled is false.
+
+  This proxy trusts the X-Auth-Request-* headers on every request. Until only
+  the authenticating pod can reach it, any workload in the cluster can set those
+  headers itself and read flows for every namespace. Set networkPolicy.enabled
+  and networkPolicy.ingressFrom before treating this as a security boundary.
+{{- end }}
+{{- if and (eq .Values.authz.mode "static") (not .Values.authz.existingConfigMap) (not .Values.authz.mapping.admins) (not .Values.authz.mapping.groupToNamespaces) (not .Values.authz.mapping.userToNamespaces) }}
+
+WARNING: the static mapping is empty, so every authenticated user resolves to an
+  empty namespace set and will see nothing at all. Populate authz.mapping.
+{{- end }}

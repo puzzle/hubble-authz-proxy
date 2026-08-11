@@ -1,0 +1,249 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"testing"
+	"time"
+
+	cppb "github.com/cilium/hubble-ui/backend/proto/customprotocol"
+	uipb "github.com/cilium/hubble-ui/backend/proto/ui"
+	"google.golang.org/protobuf/proto"
+)
+
+// fakeAuthorizer avoids needing a mapping file or a cluster.
+type fakeAuthorizer struct {
+	scope Scope
+	err   error
+}
+
+func (f fakeAuthorizer) AllowedNamespaces(context.Context, Identity) (Scope, error) {
+	return f.scope, f.err
+}
+
+// newStack wires the proxy in front of a stub backend that answers every POST
+// with the given envelope, encoded the way the real backend would.
+func newStack(t *testing.T, authz Authorizer, requireBoth bool, msg *cppb.Message, asJSON bool) *httptest.Server {
+	t.Helper()
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		body, err := encodeEnvelope(msg, asJSON)
+		if err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if asJSON {
+			w.Header().Set("Content-Type", "application/json")
+		} else {
+			w.Header().Set("Content-Type", "application/octet-stream")
+		}
+		w.Write(body)
+	}))
+	t.Cleanup(backend.Close)
+
+	u, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(NewProxy(u, authz, newServiceRegistry(time.Minute), "/api", requireBoth))
+	t.Cleanup(front.Close)
+	return front
+}
+
+func post(t *testing.T, srv *httptest.Server, path string, headers map[string]string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(http.MethodPost, srv.URL+path, bytes.NewReader(nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for k, v := range headers {
+		req.Header.Set(k, v)
+	}
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { resp.Body.Close() })
+	return resp
+}
+
+func envelopeWith(route string, payload proto.Message) *cppb.Message {
+	body, err := proto.Marshal(payload)
+	if err != nil {
+		panic(err)
+	}
+	return &cppb.Message{
+		Meta: &cppb.Meta{RouteName: route, ChannelId: "ch1"},
+		Body: &cppb.Body{Content: body},
+	}
+}
+
+func threeNamespaces() *uipb.GetControlStreamResponse {
+	return &uipb.GetControlStreamResponse{
+		Event: &uipb.GetControlStreamResponse_Namespaces{
+			Namespaces: &uipb.GetControlStreamResponse_NamespaceStates{
+				Namespaces: []*uipb.NamespaceState{
+					{Namespace: &uipb.NamespaceDescriptor{Name: "payments"}},
+					{Namespace: &uipb.NamespaceDescriptor{Name: "search"}},
+					{Namespace: &uipb.NamespaceDescriptor{Name: "kube-system"}},
+				},
+			},
+		},
+	}
+}
+
+func decodeNamespaces(t *testing.T, resp *http.Response, asJSON bool) []string {
+	t.Helper()
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg, err := decodeEnvelope(raw, asJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &uipb.GetControlStreamResponse{}
+	if err := proto.Unmarshal(msg.GetBody().GetContent(), out); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, ns := range out.GetNamespaces().GetNamespaces() {
+		names = append(names, ns.GetNamespace().GetName())
+	}
+	return names
+}
+
+func TestEndToEndFiltersNamespaces(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		name := "protobuf envelope"
+		if asJSON {
+			name = "json envelope"
+		}
+		t.Run(name, func(t *testing.T) {
+			authz := fakeAuthorizer{scope: scopeOf("payments")}
+			srv := newStack(t, authz, false,
+				envelopeWith(routeControlStream, threeNamespaces()), asJSON)
+
+			resp := post(t, srv, "/api/control-stream", map[string]string{
+				"X-Auth-Request-Email": "bob@example.com",
+			})
+			if resp.StatusCode != http.StatusOK {
+				t.Fatalf("status %d", resp.StatusCode)
+			}
+
+			names := decodeNamespaces(t, resp, asJSON)
+			if len(names) != 1 || names[0] != "payments" {
+				t.Errorf("got namespaces %v, want [payments]", names)
+			}
+		})
+	}
+}
+
+// Content-Length must track the rewritten body, or the client hangs waiting for
+// bytes that will never arrive.
+func TestEndToEndRewritesContentLength(t *testing.T) {
+	authz := fakeAuthorizer{scope: scopeOf("payments")}
+	srv := newStack(t, authz, false,
+		envelopeWith(routeControlStream, threeNamespaces()), false)
+
+	resp := post(t, srv, "/api/control-stream", map[string]string{
+		"X-Auth-Request-Email": "bob@example.com",
+	})
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.ContentLength != int64(len(raw)) {
+		t.Errorf("Content-Length %d, actual body %d", resp.ContentLength, len(raw))
+	}
+}
+
+func TestEndToEndAdminBypassesFiltering(t *testing.T) {
+	authz := fakeAuthorizer{scope: Scope{All: true}}
+	srv := newStack(t, authz, false,
+		envelopeWith(routeControlStream, threeNamespaces()), false)
+
+	resp := post(t, srv, "/api/control-stream", map[string]string{
+		"X-Auth-Request-Email": "alice@example.com",
+	})
+	if names := decodeNamespaces(t, resp, false); len(names) != 3 {
+		t.Errorf("admin got %v, want all three namespaces", names)
+	}
+}
+
+func TestEndToEndRejectsMissingIdentity(t *testing.T) {
+	authz := fakeAuthorizer{scope: scopeOf("payments")}
+	srv := newStack(t, authz, false,
+		envelopeWith(routeControlStream, threeNamespaces()), false)
+
+	resp := post(t, srv, "/api/control-stream", nil)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("status %d, want 401 — an unauthenticated caller must not reach the backend", resp.StatusCode)
+	}
+}
+
+// If the backend serves a route the proxy cannot filter, the caller must get an
+// error rather than the raw body.
+func TestEndToEndUnknownRouteFailsClosed(t *testing.T) {
+	authz := fakeAuthorizer{scope: scopeOf("payments")}
+	srv := newStack(t, authz, false,
+		envelopeWith("brand-new-route", threeNamespaces()), false)
+
+	resp := post(t, srv, "/api/brand-new-route", map[string]string{
+		"X-Auth-Request-Email": "bob@example.com",
+	})
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status %d, want 502", resp.StatusCode)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	if bytes.Contains(raw, []byte("kube-system")) {
+		t.Error("unfiltered backend body leaked through the error path")
+	}
+}
+
+// Paths outside the API prefix are not namespace-bearing and must pass through
+// without requiring identity, so health checks keep working.
+func TestNonAPIPathsPassThrough(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Write([]byte("ok"))
+	}))
+	t.Cleanup(backend.Close)
+	u, _ := url.Parse(backend.URL)
+
+	front := httptest.NewServer(NewProxy(u, fakeAuthorizer{scope: scopeOf("payments")},
+		newServiceRegistry(time.Minute), "/api", false))
+	t.Cleanup(front.Close)
+
+	resp := post(t, front, "/healthz", nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status %d, want 200", resp.StatusCode)
+	}
+}
+
+// The JSON envelope is produced by the backend with encoding/json over the
+// generated struct, not protojson. If we ever switch to protojson the field
+// names change and the frontend breaks, so pin the shape.
+func TestJSONEnvelopeUsesStructTags(t *testing.T) {
+	msg := envelopeWith(routeControlStream, threeNamespaces())
+	raw, err := encodeEnvelope(msg, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generic map[string]any
+	if err := json.Unmarshal(raw, &generic); err != nil {
+		t.Fatal(err)
+	}
+	meta, ok := generic["meta"].(map[string]any)
+	if !ok {
+		t.Fatalf("no meta object in %s", raw)
+	}
+	if _, ok := meta["route_name"]; !ok {
+		t.Errorf("meta keys = %v, want snake_case route_name", meta)
+	}
+}

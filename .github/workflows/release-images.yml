@@ -1,0 +1,125 @@
+name: Release Images
+
+on:
+    workflow_call:
+        inputs:
+            tag_name:
+                required: true
+                type: string
+    release:
+        types: [published]
+
+permissions:
+    contents: write
+    packages: write
+    id-token: write
+
+env:
+    REGISTRY: ghcr.io
+    IMAGE: ghcr.io/${{ github.repository_owner }}/hubble-authz-proxy
+    TAG_NAME: ${{ inputs.tag_name || github.event.release.tag_name }}
+
+jobs:
+    build-push-sign:
+        name: Build, push, sign and SBOM
+        runs-on: ubuntu-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Set up QEMU
+              uses: docker/setup-qemu-action@v4
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v4
+
+            - name: Compute build timestamp
+              id: ts
+              run: echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+            - name: Login to GHCR
+              uses: docker/login-action@v4
+              with:
+                  registry: ${{ env.REGISTRY }}
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+
+            - name: Docker metadata
+              id: meta
+              uses: docker/metadata-action@v6
+              with:
+                  images: ${{ env.IMAGE }}
+                  tags: |
+                      type=raw,value=${{ env.TAG_NAME }}
+                      type=raw,value=latest
+
+            - name: Build and push image
+              id: build
+              uses: docker/build-push-action@v7
+              with:
+                  context: .
+                  file: Dockerfile
+                  platforms: linux/amd64,linux/arm64
+                  build-args: |
+                      OCI_VERSION=${{ env.TAG_NAME }}
+                      OCI_REVISION=${{ github.sha }}
+                      OCI_CREATED=${{ steps.ts.outputs.created }}
+                  push: true
+                  tags: ${{ steps.meta.outputs.tags }}
+                  labels: ${{ steps.meta.outputs.labels }}
+                  sbom: true
+                  provenance: true
+
+            - name: Install cosign
+              uses: sigstore/cosign-installer@v4.1.2
+
+            - name: Prepare SBOM metadata
+              id: sbom
+              run: |
+                  IMAGE_REF="${{ env.IMAGE }}@${{ steps.build.outputs.digest }}"
+                  SBOM_FILE="sbom-hubble-authz-proxy-${{ env.TAG_NAME }}.spdx.json"
+                  echo "image_ref=$IMAGE_REF" >> "$GITHUB_OUTPUT"
+                  echo "sbom_file=$SBOM_FILE" >> "$GITHUB_OUTPUT"
+
+            - name: Generate SBOM file (Trivy)
+              uses: aquasecurity/trivy-action@v0.36.0
+              with:
+                  scan-type: image
+                  image-ref: ${{ steps.sbom.outputs.image_ref }}
+                  format: spdx-json
+                  output: ${{ steps.sbom.outputs.sbom_file }}
+
+            - name: Sign image (keyless)
+              run: cosign sign --yes "${{ steps.sbom.outputs.image_ref }}"
+
+            - name: Attest SBOM (keyless)
+              run: |
+                  cosign attest --yes \
+                    --type spdxjson \
+                    --predicate "${{ steps.sbom.outputs.sbom_file }}" \
+                    "${{ steps.sbom.outputs.image_ref }}"
+
+            - name: Upload SBOM artifact
+              uses: actions/upload-artifact@v7
+              with:
+                  name: sbom
+                  path: ${{ steps.sbom.outputs.sbom_file }}
+                  if-no-files-found: error
+
+    publish-release-assets:
+        name: Publish SBOM release assets
+        runs-on: ubuntu-latest
+        needs: build-push-sign
+
+        steps:
+            - name: Download SBOM artifacts
+              uses: actions/download-artifact@v8
+              with:
+                  path: sbom-assets
+
+            - name: Attach SBOM files to GitHub release
+              uses: softprops/action-gh-release@v3
+              with:
+                  tag_name: ${{ env.TAG_NAME }}
+                  files: sbom-assets/**/*.spdx.json

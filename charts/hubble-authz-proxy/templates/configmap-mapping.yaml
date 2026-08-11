@@ -1,0 +1,11 @@
+{{- if and (eq .Values.authz.mode "static") (not .Values.authz.existingConfigMap) }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "hubble-authz-proxy.mappingConfigMapName" . }}
+  labels:
+    {{- include "hubble-authz-proxy.labels" . | nindent 4 }}
+data:
+  mapping.yaml: |
+    {{- toYaml .Values.authz.mapping | nindent 4 }}
+{{- end }}

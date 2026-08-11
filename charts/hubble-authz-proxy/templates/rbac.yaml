@@ -1,0 +1,49 @@
+{{- if .Values.serviceAccount.create }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "hubble-authz-proxy.serviceAccountName" . }}
+  labels:
+    {{- include "hubble-authz-proxy.labels" . | nindent 4 }}
+  {{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+{{- end }}
+{{- if and .Values.rbac.create (eq .Values.authz.mode "rbac") }}
+---
+{{/*
+The rbac authorizer resolves a caller's namespaces by listing namespaces and
+then asking, per namespace, whether that user may list pods there. Creating
+SubjectAccessReviews lets it ask on the user's behalf without ever holding their
+credentials.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "hubble-authz-proxy.fullname" . }}
+  labels:
+    {{- include "hubble-authz-proxy.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["list"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "hubble-authz-proxy.fullname" . }}
+  labels:
+    {{- include "hubble-authz-proxy.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "hubble-authz-proxy.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "hubble-authz-proxy.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}
