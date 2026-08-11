@@ -84,6 +84,18 @@ jobs:
                   cache-from: type=gha
                   cache-to: type=gha,mode=max
 
+    renovate-config:
+        name: Validate Renovate config
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            # A malformed config does not fail visibly — Renovate logs it and
+            # carries on doing nothing, which looks identical to "no updates".
+            - name: Validate
+              run: npx --yes -p renovate renovate-config-validator renovate.json
+
     helm-lint-template:
         name: Helm lint and template
         runs-on: ubuntu-latest

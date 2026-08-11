@@ -1,0 +1,89 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits",
+    ":automergeMinor"
+  ],
+  "labels": [
+    "dependencies"
+  ],
+  "timezone": "Europe/Zurich",
+  "customManagers": [
+    {
+      "description": "hubble-ui-backend image pinned in the e2e harness and pre-pulled by its workflow. Not a normal dependency: it must stay in step with the github.com/cilium/hubble-ui/backend module pin, so it is grouped with it below. Both files are listed because the tag is written in both and they must not drift apart.",
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^e2e_test\\.go$/",
+        "/^\\.github/workflows/e2e\\.yml$/"
+      ],
+      "matchStrings": [
+        "quay\\.io/cilium/hubble-ui-backend:(?<currentValue>v[0-9][^\"\\s]*)"
+      ],
+      "depNameTemplate": "quay.io/cilium/hubble-ui-backend",
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": "The hubble-ui backend module and the e2e image are two views of the same thing: we parse hubble-ui's internal customprotocol, which carries no compatibility promise. Bumping one without the other silently tests the wrong pairing, so they move together and never automerge.",
+      "groupName": "hubble-ui backend (protocol pin)",
+      "matchPackageNames": [
+        "github.com/cilium/hubble-ui/backend",
+        "quay.io/cilium/hubble-ui-backend"
+      ],
+      "automerge": false,
+      "labels": [
+        "dependencies",
+        "protocol-pin"
+      ],
+      "prBodyNotes": [
+        "**Do not merge on green CI alone.**",
+        "The correct pairing is whatever Cilium ships, not the newest of each: check `hubble.ui.backend.image.tag` in `install/kubernetes/cilium/values.yaml` for the Cilium version you deploy, and set both to match.",
+        "The e2e suite verifies our filter against this image, so a mismatched pairing means the tests pass against a backend nobody runs."
+      ]
+    },
+    {
+      "description": "Cilium supplies the flow protos. Pinned to the oldest supported line on purpose (see go.mod), so major bumps are a deliberate support-window decision.",
+      "matchPackageNames": [
+        "github.com/cilium/cilium"
+      ],
+      "groupName": "cilium",
+      "automerge": false,
+      "labels": [
+        "dependencies",
+        "protocol-pin"
+      ]
+    },
+    {
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "github-actions"
+    },
+    {
+      "matchManagers": [
+        "dockerfile"
+      ],
+      "groupName": "docker base images"
+    },
+    {
+      "description": "k8s.io/* move in lockstep; splitting them produces unbuildable combinations.",
+      "matchPackageNames": [
+        "k8s.io/**",
+        "sigs.k8s.io/**"
+      ],
+      "groupName": "kubernetes"
+    },
+    {
+      "matchUpdateTypes": [
+        "major"
+      ],
+      "labels": [
+        "dependencies",
+        "major"
+      ]
+    }
+  ]
+}
