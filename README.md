@@ -18,9 +18,9 @@ It does **authorization only**. Authentication is oauth2-proxy's job.
 ## How it works
 
 ```text
-browser ──► oauth2-proxy ──► hubble-ui frontend (nginx)
-                                     │  POST /api/…  + X-Auth-Request-* headers
-                                     ▼
+browser ──► ingress-nginx ─────────► hubble-ui frontend (nginx)
+                 └─ auth_request ──►│  POST /api/…  + X-Auth-Request-* headers
+                    oauth2-proxy    ▼
                             hubble-authz-proxy          ◄── this project
                                      │  same request, untouched
                                      ▼
@@ -76,8 +76,9 @@ required:
    `networkPolicy.enabled` is for. Without it, any workload in the cluster can
    set those headers itself and read every namespace. Reachability *is* the
    authentication boundary here.
-2. **oauth2-proxy must strip inbound `X-Auth-Request-*` headers** from the client
-   before setting its own, or a user can simply send their own.
+2. **Every trusted header must be overwritten at the ingress**, via
+   `auth-response-headers`. Anything not listed there is forwarded straight from
+   the client. See [oauth2-proxy](#oauth2-proxy).
 3. **The hubble-ui backend must not be reachable directly.** Bypassing the proxy
    bypasses the filtering entirely.
 
@@ -154,6 +155,46 @@ then `kubectl rollout restart deployment/hubble-ui`.
 > direct path to the backend. Manage the override with a Helm post-renderer, or
 > add a check to your upgrade runbook. `proxy_pass_request_headers on` must stay
 > — that is what carries the identity headers through.
+
+### oauth2-proxy
+
+The proxy reads `X-Auth-Request-User`, `-Email` and `-Groups`. Those headers only
+exist in nginx **`auth_request` mode**. Running oauth2-proxy as a reverse proxy
+in front of hubble-ui instead sends `X-Forwarded-*`, which this proxy does not
+read — you would get 401s. Use an ingress with external auth:
+
+```yaml
+metadata:
+  annotations:
+    nginx.ingress.kubernetes.io/auth-url: "https://oauth2-proxy.example.com/oauth2/auth"
+    nginx.ingress.kubernetes.io/auth-signin: "https://oauth2-proxy.example.com/oauth2/start?rd=$escaped_request_uri"
+    nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups"
+```
+
+and run oauth2-proxy with:
+
+```console
+--set-xauthrequest=true                      # emit the X-Auth-Request-* headers
+--scope="openid email profile groups"        # Keycloak: groups must be in the token
+```
+
+**Every header this proxy trusts must be listed in `auth-response-headers`.**
+That annotation compiles to, per header:
+
+```nginx
+auth_request_set $authHeader0 $upstream_http_x_auth_request_user;
+proxy_set_header 'X-Auth-Request-User' $authHeader0;
+```
+
+`proxy_set_header` **overwrites** whatever the client sent, which is what makes
+the header trustworthy — a browser cannot forge it. Headers *not* on that list
+are forwarded from the client untouched. So omitting `X-Auth-Request-Groups`
+does not mean "no groups"; it means the user supplies their own, and picks their
+own namespaces. List all three.
+
+That covers spoofing through the front door. It does not cover reaching the proxy
+directly, which is what `networkPolicy.ingressFrom` is for — see
+[Security model](#security-model).
 
 ---
 
