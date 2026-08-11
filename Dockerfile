@@ -1,6 +1,10 @@
 # syntax=docker/dockerfile:1
 
-FROM golang:1.26 AS build
+# --platform=$BUILDPLATFORM keeps this stage on the builder's native
+# architecture. Without it, buildx runs the whole Go toolchain under QEMU for
+# every non-native target, turning a one-minute compile into twenty. GOARCH
+# below does the cross-compiling instead, which is free because CGO is off.
+FROM --platform=$BUILDPLATFORM golang:1.26 AS build
 
 ARG OCI_VERSION=dev
 ARG TARGETOS

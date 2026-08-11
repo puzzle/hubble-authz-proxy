@@ -70,6 +70,10 @@ jobs:
                   labels: ${{ steps.meta.outputs.labels }}
                   sbom: true
                   provenance: true
+                  # Runners start clean, so the Dockerfile's cache mounts are
+                  # empty every release and the module cache is refetched.
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
 
             - name: Install cosign
               uses: sigstore/cosign-installer@v4.1.2
