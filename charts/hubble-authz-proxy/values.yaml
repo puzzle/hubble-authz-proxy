@@ -10,6 +10,89 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# -- Deploy Hubble UI ourselves, with the proxy as a sidecar, instead of
+# proxying to Cilium's hubble-ui Deployment.
+#
+# Set hubble.ui.enabled=false in Cilium and enable this. The chart then owns the
+# whole pod:
+#
+#   frontend (nginx :8081) --/api--> 127.0.0.1:<proxy.listen>
+#   authz-proxy                ----> 127.0.0.1:<hubbleUI.backend.port>
+#   ui-backend                 ----> relay
+#
+# Why this is the recommended mode: Cilium's chart owns the hubble-ui-nginx
+# ConfigMap, so routing its /api through the proxy means editing a resource
+# Cilium will overwrite. A `helm upgrade cilium` then silently restores the
+# direct path to the backend and every user sees every namespace again, with no
+# error and nothing failing. Owning the ConfigMap removes that failure mode, and
+# lets this chart ship the NetworkPolicy for the pod rather than asking you to
+# add one to a Deployment it does not manage.
+hubbleUI:
+  enabled: false
+
+  frontend:
+    image:
+      repository: quay.io/cilium/hubble-ui
+      tag: v0.13.3
+      pullPolicy: IfNotPresent
+    port: 8081
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        memory: 256Mi
+
+  backend:
+    image:
+      repository: quay.io/cilium/hubble-ui-backend
+      tag: v0.13.3
+      pullPolicy: IfNotPresent
+    # Moved off 8090 so the proxy can take the port the frontend already calls,
+    # which keeps the nginx config identical to Cilium's.
+    port: 8091
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        memory: 512Mi
+
+  relay:
+    address: "hubble-relay:80"
+    # Cilium sets disable-server-tls in hubble-relay-config when relay serves
+    # plaintext. Enable this only if your relay terminates TLS.
+    tls:
+      enabled: false
+      # Secret holding the client cert/key and the CA for relay.
+      secretName: ""
+      serverName: ""
+
+  service:
+    type: ClusterIP
+    port: 80
+    annotations: {}
+
+  ingress:
+    enabled: false
+    className: ""
+    # Put your auth middleware / annotations here — this replaces the Ingress
+    # Cilium was rendering.
+    annotations: {}
+    #  traefik.ingress.kubernetes.io/router.middlewares: oauth2-proxy-oauth2-proxy@kubernetescrd
+    hosts:
+      - host: hubble.example.com
+        paths:
+          - path: /
+            pathType: Prefix
+    tls: []
+
+  # The backend watches namespaces and reads pods/services through the API
+  # server. Containers share the pod's ServiceAccount, so when authz.mode=rbac
+  # these rules are merged with the SubjectAccessReview permissions.
+  rbac:
+    create: true
+
 # -- Where the unmodified hubble-ui backend can be reached.
 #
 # In Cilium's default install the backend is a sidecar in the hubble-ui pod

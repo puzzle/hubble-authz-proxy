@@ -89,10 +89,15 @@ required:
 3. **The hubble-ui backend must not be reachable directly.** Bypassing the proxy
    bypasses the filtering entirely.
 
-Point 3 deserves care: in Cilium's default install the backend is a *sidecar* in
-the hubble-ui pod listening on `127.0.0.1:8090`, with no Service of its own. It
-is still reachable at `podIP:8090` from anywhere in the cluster. Restrict ingress
-to the hubble-ui pod accordingly.
+Point 3 deserves care. The ui-backend binds `0.0.0.0`, so it is reachable at
+`podIP:<port>` from anywhere in the cluster no matter which mode you run — and
+reaching it directly skips the proxy entirely, no headers needed.
+
+In **standalone** mode the chart owns that pod, so `networkPolicy.enabled=true`
+covers the backend and the proxy together: admitting only the ingress controller
+to the frontend port leaves no route to either. In **proxy-only** mode the
+backend lives in Cilium's pod, which this chart does not manage and therefore
+cannot police — you must add that policy yourself.
 
 Everything in the proxy fails closed. An unknown route, an unrecognised event
 kind, an unparseable payload, or a missing scope all produce a 502 with no body
@@ -110,9 +115,32 @@ helm install hubble-authz-proxy hubble-authz-proxy/hubble-authz-proxy \
   --values values.yaml
 ```
 
-Install it in the **same namespace as hubble-ui** — the chart creates a Service
-that selects the hubble-ui pod to expose the backend sidecar, and a Service can
-only select pods in its own namespace.
+### Two modes
+
+**Standalone (`hubbleUI.enabled=true`) — recommended.** The chart deploys Hubble
+UI itself, with the proxy as a sidecar on the loopback path:
+
+```text
+frontend :8081 ──/api──► authz-proxy :8090 ──► ui-backend :8091 ──► relay
+└──────────────────── one pod ────────────────────┘
+```
+
+Set `hubble.ui.enabled=false` in Cilium. Nothing else to wire.
+
+**Proxy-only (default).** Cilium keeps its Hubble UI and you repoint its `/api`
+at this proxy, as described below.
+
+> **Why standalone is recommended.** Cilium owns the `hubble-ui-nginx` ConfigMap,
+> so proxy-only mode means editing a resource Cilium will overwrite. A
+> `helm upgrade cilium` silently restores the direct path to the backend —
+> filtering stops, nothing errors, nothing restarts, and every user quietly sees
+> every namespace again. Standalone mode removes that failure mode, and lets the
+> chart ship the NetworkPolicy for the pod instead of asking you to add one to a
+> Deployment it does not manage.
+
+In proxy-only mode, install it in the **same namespace as hubble-ui** — the chart
+creates a Service that selects the hubble-ui pod to expose the backend sidecar,
+and a Service can only select pods in its own namespace.
 
 A minimal `values.yaml`:
 

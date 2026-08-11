@@ -27,11 +27,12 @@
   ],
   "packageRules": [
     {
-      "description": "The hubble-ui backend module and the e2e image are two views of the same thing: we parse hubble-ui's internal customprotocol, which carries no compatibility promise. Bumping one without the other silently tests the wrong pairing, so they move together and never automerge.",
+      "description": "The hubble-ui backend module, the backend image and the frontend image are all views of the same release. We parse hubble-ui's internal customprotocol, which carries no compatibility promise, and the chart now deploys the frontend and backend itself, so all of them must move together and none may automerge.",
       "groupName": "hubble-ui backend (protocol pin)",
       "matchPackageNames": [
         "github.com/cilium/hubble-ui/backend",
-        "quay.io/cilium/hubble-ui-backend"
+        "quay.io/cilium/hubble-ui-backend",
+        "quay.io/cilium/hubble-ui"
       ],
       "automerge": false,
       "labels": [

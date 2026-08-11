@@ -112,6 +112,23 @@ jobs:
             - name: Render chart (static authz)
               run: helm template hap ./charts/hubble-authz-proxy > /tmp/render-static.yaml
 
+            - name: Render chart (standalone Hubble UI)
+              run: |
+                  helm template hap ./charts/hubble-authz-proxy \
+                    --set hubbleUI.enabled=true \
+                    --set hubbleUI.ingress.enabled=true \
+                    --set networkPolicy.enabled=true \
+                    --set 'networkPolicy.ingressFrom[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=traefik' \
+                    > /tmp/render-standalone.yaml
+
+            - name: Render chart (standalone + relay TLS)
+              run: |
+                  helm template hap ./charts/hubble-authz-proxy \
+                    --set hubbleUI.enabled=true \
+                    --set hubbleUI.relay.tls.enabled=true \
+                    --set hubbleUI.relay.tls.secretName=hubble-ui-client-certs \
+                    > /tmp/render-standalone-tls.yaml
+
             - name: Render chart (rbac authz, NetworkPolicy on)
               run: |
                   helm template hap ./charts/hubble-authz-proxy \

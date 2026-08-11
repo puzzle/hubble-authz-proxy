@@ -1,0 +1,65 @@
+{{- if .Values.hubbleUI.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "hubble-authz-proxy.uiFullname" . }}
+  labels:
+    {{- include "hubble-authz-proxy.uiLabels" . | nindent 4 }}
+  {{- with .Values.hubbleUI.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  type: {{ .Values.hubbleUI.service.type }}
+  ports:
+    - port: {{ .Values.hubbleUI.service.port }}
+      targetPort: http
+      protocol: TCP
+      name: http
+    {{- if .Values.metrics.enabled }}
+    {{- /* The proxy port itself is deliberately absent: it is reachable only on
+           loopback inside the pod, which is the point of this mode. */}}
+    - port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+    {{- end }}
+  selector:
+    {{- include "hubble-authz-proxy.uiSelectorLabels" . | nindent 4 }}
+{{- end }}
+{{- if and .Values.hubbleUI.enabled .Values.hubbleUI.ingress.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "hubble-authz-proxy.uiFullname" . }}
+  labels:
+    {{- include "hubble-authz-proxy.uiLabels" . | nindent 4 }}
+  {{- with .Values.hubbleUI.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with .Values.hubbleUI.ingress.className }}
+  ingressClassName: {{ . }}
+  {{- end }}
+  {{- with .Values.hubbleUI.ingress.tls }}
+  tls:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  rules:
+    {{- range .Values.hubbleUI.ingress.hosts }}
+    - host: {{ .host | quote }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ include "hubble-authz-proxy.uiFullname" $ }}
+                port:
+                  number: {{ $.Values.hubbleUI.service.port }}
+          {{- end }}
+    {{- end }}
+{{- end }}

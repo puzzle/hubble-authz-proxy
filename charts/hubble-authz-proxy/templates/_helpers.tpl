@@ -63,3 +63,33 @@ at the Service this chart creates for the hubble-ui backend sidecar.
 {{- define "hubble-authz-proxy.mappingConfigMapName" -}}
 {{- default (printf "%s-mapping" (include "hubble-authz-proxy.fullname" .)) .Values.authz.existingConfigMap }}
 {{- end }}
+
+{{/* Name of the Hubble UI resources this chart owns in standalone mode. */}}
+{{- define "hubble-authz-proxy.uiFullname" -}}
+{{- printf "%s-ui" (include "hubble-authz-proxy.fullname" .) | trunc 63 | trimSuffix "-" }}
+{{- end }}
+
+{{- define "hubble-authz-proxy.uiSelectorLabels" -}}
+app.kubernetes.io/name: {{ include "hubble-authz-proxy.name" . }}-ui
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+
+{{- define "hubble-authz-proxy.uiLabels" -}}
+helm.sh/chart: {{ include "hubble-authz-proxy.chart" . }}
+{{ include "hubble-authz-proxy.uiSelectorLabels" . }}
+{{- if .Chart.AppVersion }}
+app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
+{{- end }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
+The port the proxy listens on, as a bare number. proxy.listen is a listen
+address (":8090"), but nginx and containerPort need the number alone.
+*/}}
+{{- define "hubble-authz-proxy.listenPort" -}}
+{{- $parts := splitList ":" .Values.proxy.listen -}}
+{{- $port := last $parts -}}
+{{- if not $port }}{{ fail (printf "cannot derive a port from proxy.listen=%q" .Values.proxy.listen) }}{{ end -}}
+{{- $port }}
+{{- end }}

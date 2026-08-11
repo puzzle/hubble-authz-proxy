@@ -1,3 +1,5 @@
+{{- $needsSAR := and .Values.rbac.create (eq .Values.authz.mode "rbac") -}}
+{{- $needsUI := and .Values.hubbleUI.enabled .Values.hubbleUI.rbac.create -}}
 {{- if .Values.serviceAccount.create }}
 apiVersion: v1
 kind: ServiceAccount
@@ -10,13 +12,13 @@ metadata:
     {{- toYaml . | nindent 4 }}
   {{- end }}
 {{- end }}
-{{- if and .Values.rbac.create (eq .Values.authz.mode "rbac") }}
+{{- if or $needsSAR $needsUI }}
 ---
 {{/*
-The rbac authorizer resolves a caller's namespaces by listing namespaces and
-then asking, per namespace, whether that user may list pods there. Creating
-SubjectAccessReviews lets it ask on the user's behalf without ever holding their
-credentials.
+One ClusterRole for the whole pod. Containers share a ServiceAccount, so in
+standalone mode the Hubble UI backend's read access and the proxy's
+SubjectAccessReview permission end up on the same identity whether we like it or
+not; merging them here at least makes that explicit.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -25,12 +27,37 @@ metadata:
   labels:
     {{- include "hubble-authz-proxy.labels" . | nindent 4 }}
 rules:
+  {{- if $needsUI }}
+  # Read access the hubble-ui backend needs: it watches namespaces for the
+  # picker and reads pods/services to build the service map.
+  - apiGroups: [""]
+    resources:
+      - componentstatuses
+      - endpoints
+      - namespaces
+      - nodes
+      - pods
+      - services
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["cilium.io"]
+    resources: ["*"]
+    verbs: ["get", "list", "watch"]
+  {{- end }}
+  {{- if $needsSAR }}
+  {{- if not $needsUI }}
+  # The rbac authorizer lists namespaces to know what to ask about.
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["list"]
+  {{- end }}
+  # Asking on the caller's behalf, so the proxy never holds their credentials.
   - apiGroups: ["authorization.k8s.io"]
     resources: ["subjectaccessreviews"]
     verbs: ["create"]
+  {{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -1,35 +1,60 @@
-hubble-authz-proxy {{ .Chart.AppVersion }} is installed as:
+hubble-authz-proxy {{ .Chart.AppVersion }} installed.
 
-    {{ include "hubble-authz-proxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
-
-Upstream backend: {{ include "hubble-authz-proxy.backendURL" . }}
 Authorization:    {{ .Values.authz.mode }}{{ if eq .Values.authz.mode "static" }} ({{ len .Values.authz.mapping.groupToNamespaces }} group mappings, {{ len .Values.authz.mapping.admins }} admins){{ end }}
 Cross-namespace:  {{ if .Values.proxy.requireBothEndpoints }}strict (both endpoints must be in scope){{ else }}lenient (either endpoint suffices){{ end }}
 
-Installing the chart does NOT put the proxy in the data path on its own. Two
-steps remain:
+{{- if .Values.hubbleUI.enabled }}
 
-1. Repoint the hubble-ui frontend's /api at this Service.
+Mode: STANDALONE — this chart owns Hubble UI.
 
-   Cilium renders the frontend's nginx.conf into the "hubble-ui-nginx" ConfigMap
-   with "proxy_pass http://127.0.0.1:8090;". Replace that with:
+    frontend :{{ .Values.hubbleUI.frontend.port }} --/api--> proxy :{{ include "hubble-authz-proxy.listenPort" . }} --> backend :{{ .Values.hubbleUI.backend.port }} --> {{ .Values.hubbleUI.relay.address }}
 
-       proxy_pass http://{{ include "hubble-authz-proxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }};
+Reach it at:
 
-   then restart the hubble-ui Deployment. Note that a Cilium chart upgrade
-   rewrites that ConfigMap, so this needs to be reapplied (or managed with a
-   Helm post-renderer).
+    {{ include "hubble-authz-proxy.uiFullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.hubbleUI.service.port }}
 
-2. Put oauth2-proxy in front of the frontend so X-Auth-Request-* headers exist,
-   and make sure it STRIPS any inbound copies of those headers from the client.
+Remaining steps:
 
+1. Disable Cilium's own Hubble UI, or the two will both claim the name and the
+   old one will keep serving unfiltered:
+
+       hubble.ui.enabled=false
+
+2. Point authentication at {{ if .Values.hubbleUI.ingress.enabled }}the Ingress this chart created{{ else }}the Service above (set hubbleUI.ingress.enabled to have the chart render the Ingress){{ end }},
+   and make sure it sets X-Auth-Request-User / -Email / -Groups.
+
+{{- else }}
+
+Mode: PROXY-ONLY — Cilium still owns Hubble UI.
+
+    {{ include "hubble-authz-proxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }}
+    upstream: {{ include "hubble-authz-proxy.backendURL" . }}
+
+Installing the chart does NOT put the proxy in the data path. Repoint the
+frontend's /api at this Service in the "hubble-ui-nginx" ConfigMap:
+
+    proxy_pass http://{{ include "hubble-authz-proxy.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.service.port }};
+
+then restart the hubble-ui Deployment.
+
+  NOTE: Cilium owns that ConfigMap. A `helm upgrade cilium` rewrites it, which
+  silently restores the direct path to the backend and disables filtering
+  entirely — no error, nothing crashes, every user simply sees everything
+  again. Setting hubbleUI.enabled=true makes this chart own the UI and removes
+  that failure mode.
+
+{{- end }}
 {{ if not .Values.networkPolicy.enabled }}
 WARNING: networkPolicy.enabled is false.
 
   This proxy trusts the X-Auth-Request-* headers on every request. Until only
   the authenticating pod can reach it, any workload in the cluster can set those
-  headers itself and read flows for every namespace. Set networkPolicy.enabled
-  and networkPolicy.ingressFrom before treating this as a security boundary.
+  headers itself and read flows for every namespace.
+{{- if not .Values.hubbleUI.enabled }}
+  In proxy-only mode the hubble-ui backend is also reachable at podIP:8090 in
+  Cilium's pod, bypassing the proxy completely; this chart cannot police a pod
+  it does not manage.
+{{- end }}
 {{- end }}
 {{- if and (eq .Values.authz.mode "static") (not .Values.authz.existingConfigMap) (not .Values.authz.mapping.admins) (not .Values.authz.mapping.groupToNamespaces) (not .Values.authz.mapping.userToNamespaces) }}
 

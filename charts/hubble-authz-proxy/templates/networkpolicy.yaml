@@ -1,8 +1,14 @@
 {{- if .Values.networkPolicy.enabled }}
+{{- $ui := .Values.hubbleUI.enabled -}}
 {{/*
-The proxy trusts the X-Auth-Request-* headers on every request it receives, so
-reachability IS the authentication boundary. Without this policy, any pod that
-can route to the proxy can set those headers itself and read any namespace.
+In standalone mode this is the policy that makes the proxy a boundary rather
+than a convention. Everything sits in one pod, so admitting only the ingress
+controller to the frontend port leaves no route to the proxy or the backend from
+anywhere else in the cluster: the backend still binds 0.0.0.0, and without this
+anyone could reach it directly and skip filtering entirely.
+
+In proxy-only mode it protects the proxy alone — the backend lives in Cilium's
+pod, which this chart does not manage and therefore cannot police.
 */}}
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -13,7 +19,11 @@ metadata:
 spec:
   podSelector:
     matchLabels:
+      {{- if $ui }}
+      {{- include "hubble-authz-proxy.uiSelectorLabels" . | nindent 6 }}
+      {{- else }}
       {{- include "hubble-authz-proxy.selectorLabels" . | nindent 6 }}
+      {{- end }}
   policyTypes:
     - Ingress
   ingress:
@@ -22,7 +32,11 @@ spec:
         {{- toYaml .Values.networkPolicy.ingressFrom | nindent 8 }}
       ports:
         - protocol: TCP
+          {{- if $ui }}
+          port: {{ .Values.hubbleUI.frontend.port }}
+          {{- else }}
           port: {{ .Values.service.port }}
+          {{- end }}
     {{- else }}
     {{- /* An empty ingress list denies all inbound traffic. That is the safe
            default for a misconfiguration, but it also means nothing can reach
@@ -31,7 +45,7 @@ spec:
     {{- end }}
     {{- if and .Values.metrics.enabled .Values.networkPolicy.metricsIngressFrom }}
     {{- /* Scraping needs its own rule: the rule above admits only the
-           authenticating pod, and on the proxy port only. */}}
+           authenticating pod, and on one port. */}}
     - from:
         {{- toYaml .Values.networkPolicy.metricsIngressFrom | nindent 8 }}
       ports:
