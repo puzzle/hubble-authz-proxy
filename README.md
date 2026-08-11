@@ -161,7 +161,49 @@ then `kubectl rollout restart deployment/hubble-ui`.
 The proxy reads `X-Auth-Request-User`, `-Email` and `-Groups`. Those headers only
 exist in nginx **`auth_request` mode**. Running oauth2-proxy as a reverse proxy
 in front of hubble-ui instead sends `X-Forwarded-*`, which this proxy does not
-read — you would get 401s. Use an ingress with external auth:
+read — you would get 401s.
+
+**1. Install oauth2-proxy** on its own hostname:
+
+```console
+helm repo add oauth2-proxy https://oauth2-proxy.github.io/manifests
+helm install oauth2-proxy oauth2-proxy/oauth2-proxy \
+  --namespace kube-system --values oauth2-proxy-values.yaml
+```
+
+```yaml
+# oauth2-proxy-values.yaml
+config:
+  clientID: hubble-ui
+  clientSecret: "<from your IdP>"
+  # Must be 16, 24 or 32 bytes:
+  #   openssl rand -base64 32 | tr -- '+/' '-_'
+  cookieSecret: "<generated>"
+
+# NOTE: a map, not a list. Keys are flag names without the leading --.
+extraArgs:
+  provider: oidc
+  oidc-issuer-url: https://keycloak.example.com/realms/main
+  set-xauthrequest: "true"                 # emit the X-Auth-Request-* headers
+  scope: "openid email profile groups"     # groups must be in the token
+  email-domain: "*"                        # default rejects every login
+  reverse-proxy: "true"                    # trust the ingress's X-Forwarded-*
+  upstream: "static://202"                 # auth_request only; no real upstream
+  cookie-domain: ".example.com"            # share the cookie with the UI host
+  whitelist-domain: ".example.com"         # allow redirect back to it
+
+ingress:
+  enabled: true
+  hosts:
+    - oauth2-proxy.example.com
+```
+
+`email-domain` and the two domain settings are the usual causes of a login loop:
+the default `email-domain` rejects every user, and without the cookie/whitelist
+domains the session is set on the oauth2-proxy host and never seen by the UI
+host.
+
+**2. Point the hubble-ui ingress at it:**
 
 ```yaml
 metadata:
@@ -169,13 +211,6 @@ metadata:
     nginx.ingress.kubernetes.io/auth-url: "https://oauth2-proxy.example.com/oauth2/auth"
     nginx.ingress.kubernetes.io/auth-signin: "https://oauth2-proxy.example.com/oauth2/start?rd=$escaped_request_uri"
     nginx.ingress.kubernetes.io/auth-response-headers: "X-Auth-Request-User,X-Auth-Request-Email,X-Auth-Request-Groups"
-```
-
-and run oauth2-proxy with:
-
-```console
---set-xauthrequest=true                      # emit the X-Auth-Request-* headers
---scope="openid email profile groups"        # Keycloak: groups must be in the token
 ```
 
 **Every header this proxy trusts must be listed in `auth-response-headers`.**
