@@ -11,6 +11,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // Proxy is an HTTP reverse proxy that sits between the hubble-ui frontend
@@ -79,24 +81,35 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Health checks and static assets are not namespace-bearing, and must not
 	// require an identity.
 	if !strings.HasPrefix(r.URL.Path, p.apiPrefix) {
+		requestsTotal.WithLabelValues("-", "passthrough").Inc()
 		ctx := context.WithValue(r.Context(), reqInfoCtxKey, reqInfo{filtered: false})
 		p.rp.ServeHTTP(w, r.WithContext(ctx))
 		return
 	}
 
+	// Label by the path segment rather than the backend's authoritative route
+	// name, which is only known once the response comes back. Bounded by
+	// knownRoute so a caller cannot blow up metric cardinality with random paths.
+	route := knownRoute(strings.TrimPrefix(r.URL.Path, p.apiPrefix))
+	timer := prometheus.NewTimer(requestDuration.WithLabelValues(route))
+	defer timer.ObserveDuration()
+
 	id, err := identityFromRequest(r)
 	if err != nil {
+		requestsTotal.WithLabelValues(route, "unauthenticated").Inc()
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
 
 	scope, err := p.authz.AllowedNamespaces(r.Context(), id)
 	if err != nil {
+		requestsTotal.WithLabelValues(route, "authz_error").Inc()
 		log.Printf("resolve namespaces for %q: %v", id.Email, err)
 		http.Error(w, "authorization backend unavailable", http.StatusInternalServerError)
 		return
 	}
 
+	requestsTotal.WithLabelValues(route, "filtered").Inc()
 	ctx := context.WithValue(r.Context(), reqInfoCtxKey, reqInfo{filtered: true, scope: scope})
 	p.rp.ServeHTTP(w, r.WithContext(ctx))
 }

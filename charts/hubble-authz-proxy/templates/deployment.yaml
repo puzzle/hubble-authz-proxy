@@ -46,6 +46,8 @@ spec:
             - --authz={{ .Values.authz.mode }}
             - --require-both-endpoints={{ .Values.proxy.requireBothEndpoints }}
             - --channel-ttl={{ .Values.proxy.channelTTL }}
+            - --shutdown-timeout={{ .Values.proxy.shutdownTimeout }}
+            - --metrics-listen={{ if .Values.metrics.enabled }}:{{ .Values.metrics.port }}{{ end }}
             {{- if eq .Values.authz.mode "static" }}
             - --authz-config=/etc/hubble-authz/mapping.yaml
             {{- else }}
@@ -62,6 +64,11 @@ spec:
             - name: http
               containerPort: {{ .Values.service.port }}
               protocol: TCP
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP
+            {{- end }}
           {{- with .Values.livenessProbe }}
           livenessProbe:
             {{- toYaml . | nindent 12 }}

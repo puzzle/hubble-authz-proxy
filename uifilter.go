@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	uipb "github.com/cilium/hubble-ui/backend/proto/ui"
@@ -16,6 +17,18 @@ const (
 )
 
 var errUnknownRoute = fmt.Errorf("unknown backend route")
+
+// knownRoute maps an arbitrary path segment onto a fixed label set. Metric
+// labels must never be caller-controlled, or anyone able to reach the proxy can
+// exhaust its memory with unique time series.
+func knownRoute(s string) string {
+	switch name := strings.TrimPrefix(s, "/"); name {
+	case routeControlStream, routeServiceMapStre:
+		return name
+	default:
+		return "other"
+	}
+}
 
 // filterBody rewrites one customprotocol body for a scoped caller.
 //
@@ -58,6 +71,9 @@ func (p *Proxy) filterControlStream(body []byte, scope Scope) ([]byte, error) {
 	for _, ns := range states.GetNamespaces() {
 		if scope.Namespaces[ns.GetNamespace().GetName()] {
 			kept = append(kept, ns)
+			eventsTotal.WithLabelValues("namespace_state", "kept").Inc()
+		} else {
+			eventsTotal.WithLabelValues("namespace_state", "dropped").Inc()
 		}
 	}
 	states.Namespaces = kept
@@ -94,13 +110,38 @@ func (p *Proxy) filterServiceMapStream(channelID string, body []byte, scope Scop
 	// Pass 2: keep what the caller may see.
 	kept := make([]*uipb.Event, 0, len(resp.GetEvents()))
 	for _, ev := range resp.GetEvents() {
-		if e, ok := p.eventVisible(channelID, ev, scope); ok {
+		e, ok := p.eventVisible(channelID, ev, scope)
+		if ok {
 			kept = append(kept, e)
+			eventsTotal.WithLabelValues(eventKind(ev), "kept").Inc()
+		} else {
+			eventsTotal.WithLabelValues(eventKind(ev), "dropped").Inc()
 		}
 	}
 	resp.Events = kept
 
 	return proto.Marshal(resp)
+}
+
+// eventKind labels an event for metrics. Like knownRoute, the label set is fixed
+// by the oneof rather than derived from payload contents.
+func eventKind(ev *uipb.Event) string {
+	switch ev.GetEvent().(type) {
+	case *uipb.Event_Flow:
+		return "flow"
+	case *uipb.Event_Flows:
+		return "flows"
+	case *uipb.Event_NamespaceState:
+		return "namespace_state"
+	case *uipb.Event_ServiceState:
+		return "service_state"
+	case *uipb.Event_ServiceLinkState:
+		return "service_link_state"
+	case *uipb.Event_Notification:
+		return "notification"
+	default:
+		return "unknown"
+	}
 }
 
 // eventVisible decides a single service-map event. The returned event may be a

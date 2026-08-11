@@ -20,11 +20,14 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"log"
 	"net/http"
 	"net/url"
+	"os/signal"
+	"syscall"
 	"time"
 )
 
@@ -33,14 +36,16 @@ var version = "dev"
 
 func main() {
 	var (
-		listen     = flag.String("listen", ":8090", "address the Hubble UI frontend proxies /api to")
-		backendURL = flag.String("backend", "http://hubble-ui-backend:8090", "upstream hubble-ui backend base URL")
-		apiPrefix  = flag.String("api-prefix", "/api", "path prefix carrying backend routes; everything else is passed through")
-		mode       = flag.String("authz", "static", "authorization backend: static | rbac")
-		mapFile    = flag.String("authz-config", "/etc/hubble-authz/mapping.yaml", "static mode: group/user -> namespace mapping")
-		rbacTTL    = flag.Duration("rbac-ttl", 60*time.Second, "rbac mode: cache TTL for a caller's resolved namespace set")
-		channelTTL = flag.Duration("channel-ttl", 10*time.Minute, "how long to keep per-channel service-map state after a client goes idle")
-		reqBoth    = flag.Bool("require-both-endpoints", false, "only show traffic when BOTH endpoints are in allowed namespaces (stricter)")
+		listen        = flag.String("listen", ":8090", "address the Hubble UI frontend proxies /api to")
+		metricsListen = flag.String("metrics-listen", ":9090", "address serving /metrics and /healthz; empty disables it")
+		backendURL    = flag.String("backend", "http://hubble-ui-backend:8090", "upstream hubble-ui backend base URL")
+		apiPrefix     = flag.String("api-prefix", "/api", "path prefix carrying backend routes; everything else is passed through")
+		mode          = flag.String("authz", "static", "authorization backend: static | rbac")
+		mapFile       = flag.String("authz-config", "/etc/hubble-authz/mapping.yaml", "static mode: group/user -> namespace mapping")
+		rbacTTL       = flag.Duration("rbac-ttl", 60*time.Second, "rbac mode: cache TTL for a caller's resolved namespace set")
+		channelTTL    = flag.Duration("channel-ttl", 10*time.Minute, "how long to keep per-channel service-map state after a client goes idle")
+		reqBoth       = flag.Bool("require-both-endpoints", false, "only show traffic when BOTH endpoints are in allowed namespaces (stricter)")
+		shutdownGrace = flag.Duration("shutdown-timeout", 20*time.Second, "how long to let in-flight requests finish after SIGTERM")
 	)
 	flag.Parse()
 
@@ -52,23 +57,34 @@ func main() {
 		log.Fatalf("-backend must be an absolute URL, got %q", *backendURL)
 	}
 
+	// Cancelled on SIGTERM/SIGINT. Kubernetes sends SIGTERM and then removes the
+	// pod from Service endpoints, so draining matters here: the UI holds long
+	// poll requests open, and killing them mid-flight surfaces as errors in the
+	// browser during every rollout.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer stop()
+
 	var authz Authorizer
 	switch *mode {
 	case "static":
 		authz, err = NewStaticAuthorizer(*mapFile)
 	case "rbac":
-		authz, err = NewRBACAuthorizer(*rbacTTL)
+		var rbacAuthz *RBACAuthorizer
+		rbacAuthz, err = NewRBACAuthorizer(*rbacTTL)
+		if err == nil {
+			go rbacAuthz.RunSweeper(ctx)
+			authz = rbacAuthz
+		}
 	default:
 		err = errors.New("unknown -authz mode (want static|rbac)")
 	}
 	if err != nil {
 		log.Fatalf("authorizer: %v", err)
 	}
+	authz = instrumentedAuthorizer{next: authz, mode: *mode}
 
 	reg := newServiceRegistry(*channelTTL)
-	stop := make(chan struct{})
-	defer close(stop)
-	go reg.runSweeper(stop)
+	go reg.RunSweeper(ctx)
 
 	proxy := NewProxy(backend, authz, reg, *apiPrefix, *reqBoth)
 
@@ -77,7 +93,47 @@ func main() {
 		Handler:           proxy,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
-	log.Printf("hubble-authz-proxy %s: listen=%s backend=%s authz=%s requireBoth=%v",
-		version, *listen, backend, *mode, *reqBoth)
-	log.Fatal(srv.ListenAndServe())
+
+	var metricsSrv *http.Server
+	if *metricsListen != "" {
+		metricsSrv = &http.Server{
+			Addr:              *metricsListen,
+			Handler:           metricsHandler(metricsRegistry()),
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				log.Printf("metrics listener: %v", err)
+			}
+		}()
+	}
+
+	log.Printf("hubble-authz-proxy %s: listen=%s metrics=%s backend=%s authz=%s requireBoth=%v",
+		version, *listen, *metricsListen, backend, *mode, *reqBoth)
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.ListenAndServe() }()
+
+	select {
+	case err := <-serveErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatalf("serve: %v", err)
+		}
+	case <-ctx.Done():
+		log.Printf("signal received, draining for up to %s", *shutdownGrace)
+	}
+
+	// Detached from ctx, which is already cancelled by the signal.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), *shutdownGrace)
+	defer cancel()
+
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		log.Printf("proxy shutdown: %v", err)
+	}
+	if metricsSrv != nil {
+		if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("metrics shutdown: %v", err)
+		}
+	}
+	log.Print("stopped")
 }

@@ -2,14 +2,23 @@ package main
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 	authzv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+)
+
+// Defaults for RBACAuthorizer tuning.
+const (
+	defaultSARConcurrency = 16
+	defaultMaxCacheSize   = 2048
 )
 
 // RBACAuthorizer derives the visible namespace set from real cluster RBAC: for
@@ -17,17 +26,28 @@ import (
 // may "list pods". This keeps the Hubble view in lockstep with kubectl access
 // and needs no mapping to maintain.
 //
-// Cost: O(#namespaces) SubjectAccessReviews per cache miss, so results are
-// cached per identity with a TTL. For large clusters prefer one of:
-//   - watching RoleBindings/ClusterRoleBindings and precomputing group->ns;
-//   - a SelfSubjectRulesReview using the caller's own token (needs the token
-//     forwarded by oauth2-proxy AND the API server trusting that OIDC issuer).
+// A resolution costs one SubjectAccessReview per namespace, which is why three
+// things guard it:
+//
+//   - results are cached per identity for ttl;
+//   - singleflight collapses concurrent misses for the same identity, so a cold
+//     cache under load issues one sweep rather than one per in-flight request;
+//   - the sweep itself runs concurrency reviews in parallel, turning an
+//     O(namespaces) serial latency into roughly O(namespaces/concurrency).
+//
+// The cache is bounded and swept, because its keys are attacker-influenced:
+// every distinct user/group combination that reaches the proxy creates an entry.
 //
 // The proxy's ServiceAccount needs: create on subjectaccessreviews, list on
 // namespaces.
 type RBACAuthorizer struct {
-	kc  kubernetes.Interface
-	ttl time.Duration
+	kc          kubernetes.Interface
+	ttl         time.Duration
+	concurrency int
+	maxCache    int
+	now         func() time.Time
+
+	group singleflight.Group
 
 	mu    sync.Mutex
 	cache map[string]cachedScope
@@ -47,40 +67,88 @@ func NewRBACAuthorizer(ttl time.Duration) (*RBACAuthorizer, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &RBACAuthorizer{kc: kc, ttl: ttl, cache: map[string]cachedScope{}}, nil
+	return newRBACAuthorizer(kc, ttl), nil
+}
+
+func newRBACAuthorizer(kc kubernetes.Interface, ttl time.Duration) *RBACAuthorizer {
+	return &RBACAuthorizer{
+		kc:          kc,
+		ttl:         ttl,
+		concurrency: defaultSARConcurrency,
+		maxCache:    defaultMaxCacheSize,
+		now:         time.Now,
+		cache:       map[string]cachedScope{},
+	}
 }
 
 func (a *RBACAuthorizer) AllowedNamespaces(ctx context.Context, id Identity) (Scope, error) {
-	key := id.User + "|" + id.Email + "|" + strings.Join(id.Groups, ",")
+	key := cacheKey(id)
 
-	a.mu.Lock()
-	if c, ok := a.cache[key]; ok && time.Now().Before(c.expires) {
-		a.mu.Unlock()
-		return c.scope, nil
+	if scope, ok := a.cached(key); ok {
+		scopeCacheTotal.WithLabelValues("hit").Inc()
+		return scope, nil
 	}
-	a.mu.Unlock()
+	scopeCacheTotal.WithLabelValues("miss").Inc()
 
+	// singleflight dedupes concurrent misses for the same identity. Note it does
+	// NOT inherit any one caller's context, so a client disconnecting mid-sweep
+	// cannot cancel the resolution that other waiters are blocked on; the sweep
+	// uses a context detached from cancellation but bounded by ttl.
+	res, err, _ := a.group.Do(key, func() (any, error) {
+		// Re-check: another goroutine may have populated the cache between our
+		// lookup and joining the flight.
+		if scope, ok := a.cached(key); ok {
+			return scope, nil
+		}
+		sweepCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), a.ttl)
+		defer cancel()
+
+		scope, err := a.resolve(sweepCtx, id)
+		if err != nil {
+			return Scope{}, err
+		}
+		a.store(key, scope)
+		return scope, nil
+	})
+	if err != nil {
+		return Scope{}, err
+	}
+	return res.(Scope), nil
+}
+
+func (a *RBACAuthorizer) resolve(ctx context.Context, id Identity) (Scope, error) {
 	nsList, err := a.kc.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return Scope{}, err
 	}
+
+	var mu sync.Mutex
 	allowed := map[string]bool{}
+
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(a.concurrency)
 	for i := range nsList.Items {
 		name := nsList.Items[i].Name
-		ok, err := a.canListPods(ctx, id, name)
-		if err != nil {
-			return Scope{}, err
-		}
-		if ok {
-			allowed[name] = true
-		}
+		g.Go(func() error {
+			ok, err := a.canListPods(gctx, id, name)
+			if err != nil {
+				return err
+			}
+			if ok {
+				mu.Lock()
+				allowed[name] = true
+				mu.Unlock()
+			}
+			return nil
+		})
 	}
-	scope := Scope{Namespaces: allowed}
-
-	a.mu.Lock()
-	a.cache[key] = cachedScope{scope: scope, expires: time.Now().Add(a.ttl)}
-	a.mu.Unlock()
-	return scope, nil
+	// Any review failing fails the whole resolution: a partial answer would look
+	// like a smaller namespace set, which silently under-shows rather than
+	// erroring, and would then be cached.
+	if err := g.Wait(); err != nil {
+		return Scope{}, err
+	}
+	return Scope{Namespaces: allowed}, nil
 }
 
 func (a *RBACAuthorizer) canListPods(ctx context.Context, id Identity, ns string) (bool, error) {
@@ -96,11 +164,80 @@ func (a *RBACAuthorizer) canListPods(ctx context.Context, id Identity, ns string
 			},
 		},
 	}
+	subjectAccessReviewsTotal.Inc()
 	res, err := a.kc.AuthorizationV1().SubjectAccessReviews().Create(ctx, sar, metav1.CreateOptions{})
 	if err != nil {
 		return false, err
 	}
 	return res.Status.Allowed, nil
+}
+
+func (a *RBACAuthorizer) cached(key string) (Scope, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	c, ok := a.cache[key]
+	if !ok || !a.now().Before(c.expires) {
+		return Scope{}, false
+	}
+	return c.scope, true
+}
+
+func (a *RBACAuthorizer) store(key string, scope Scope) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if len(a.cache) >= a.maxCache {
+		a.evictExpiredLocked()
+		// Still full of live entries: drop arbitrary ones rather than grow without
+		// bound. Losing an entry only costs a re-resolution.
+		for k := range a.cache {
+			if len(a.cache) < a.maxCache {
+				break
+			}
+			delete(a.cache, k)
+		}
+	}
+	a.cache[key] = cachedScope{scope: scope, expires: a.now().Add(a.ttl)}
+}
+
+func (a *RBACAuthorizer) evictExpiredLocked() {
+	now := a.now()
+	for k, c := range a.cache {
+		if !now.Before(c.expires) {
+			delete(a.cache, k)
+		}
+	}
+}
+
+// sweep drops expired entries so idle identities do not pin memory.
+func (a *RBACAuthorizer) sweep() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.evictExpiredLocked()
+}
+
+// RunSweeper evicts expired cache entries until ctx is cancelled.
+func (a *RBACAuthorizer) RunSweeper(ctx context.Context) {
+	t := time.NewTicker(a.ttl)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			a.sweep()
+		}
+	}
+}
+
+// cacheKey identifies a caller. Groups are sorted so that an identity presenting
+// the same groups in a different header order reuses its entry instead of
+// duplicating one (and triggering a fresh SAR sweep).
+func cacheKey(id Identity) string {
+	groups := append([]string(nil), id.Groups...)
+	slices.Sort(groups)
+	return id.User + "\x00" + id.Email + "\x00" + strings.Join(groups, "\x00")
 }
 
 func firstNonEmpty(a, b string) string {

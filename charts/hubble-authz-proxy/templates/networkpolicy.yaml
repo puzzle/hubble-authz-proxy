@@ -29,4 +29,13 @@ spec:
            the proxy — set networkPolicy.ingressFrom. */}}
     []
     {{- end }}
+    {{- if and .Values.metrics.enabled .Values.networkPolicy.metricsIngressFrom }}
+    {{- /* Scraping needs its own rule: the rule above admits only the
+           authenticating pod, and on the proxy port only. */}}
+    - from:
+        {{- toYaml .Values.networkPolicy.metricsIngressFrom | nindent 8 }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.metrics.port }}
+    {{- end }}
 {{- end }}

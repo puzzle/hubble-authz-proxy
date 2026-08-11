@@ -15,6 +15,12 @@ spec:
       targetPort: http
       protocol: TCP
       name: http
+    {{- if .Values.metrics.enabled }}
+    - port: {{ .Values.metrics.port }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+    {{- end }}
   selector:
     {{- include "hubble-authz-proxy.selectorLabels" . | nindent 4 }}
 {{- if and .Values.backend.service.create (not .Values.backend.url) }}

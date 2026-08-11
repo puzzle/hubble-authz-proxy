@@ -43,6 +43,27 @@ proxy:
   requireBothEndpoints: false
   # -- How long per-channel service-map state is kept after a client goes idle.
   channelTTL: 10m
+  # -- How long in-flight requests get to finish after SIGTERM. The UI holds
+  # long-poll requests open, so cutting them short surfaces as browser errors
+  # during every rollout. Keep below terminationGracePeriodSeconds.
+  shutdownTimeout: 20s
+
+# -- Metrics and health, served on their own port.
+#
+# Deliberately not on the proxy port: reaching that port is what authenticates a
+# caller, so anything exposed there widens the trust boundary and would need
+# Prometheus allowed through the NetworkPolicy.
+metrics:
+  enabled: true
+  port: 9090
+  serviceMonitor:
+    # Requires the prometheus-operator CRDs.
+    enabled: false
+    interval: 30s
+    scrapeTimeout: 10s
+    labels: {}
+    relabelings: []
+    metricRelabelings: []
 
 authz:
   # -- static | rbac
@@ -111,6 +132,14 @@ networkPolicy:
   #  - podSelector:
   #      matchLabels:
   #        k8s-app: hubble-ui
+
+  # -- Pods allowed to reach the metrics port. Needs its own entry: ingressFrom
+  # above admits only the authenticating pod, and only on the proxy port, so
+  # leaving this empty means Prometheus cannot scrape.
+  metricsIngressFrom: []
+  #  - namespaceSelector:
+  #      matchLabels:
+  #        kubernetes.io/metadata.name: monitoring
 
 podAnnotations: {}
 podLabels: {}

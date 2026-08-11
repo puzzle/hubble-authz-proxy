@@ -17,7 +17,7 @@ It does **authorization only**. Authentication is oauth2-proxy's job.
 
 ## How it works
 
-```
+```text
 browser ──► oauth2-proxy ──► hubble-ui frontend (nginx)
                                      │  POST /api/…  + X-Auth-Request-* headers
                                      ▼
@@ -45,7 +45,7 @@ The backend serves two routes, both carrying protobuf payloads inside a
 `customprotocol.Message` envelope.
 
 | Route | Payload | Treatment |
-|---|---|---|
+| --- | --- | --- |
 | `control-stream` | `NamespaceState` | Only namespaces in scope, so the picker can't enumerate the cluster |
 | `control-stream` | `Notification` | Passed through — relay/k8s connection state is cluster-wide |
 | `service-map-stream` | `Flow`, `Flows` | Dropped unless an endpoint is in scope |
@@ -179,8 +179,20 @@ rolls the Deployment when the ConfigMap changes.
 
 **`rbac`** — asks the API server, per namespace, whether the caller may `list
 pods` there, via `SubjectAccessReview`. Tracks real `kubectl` access with no
-mapping to maintain. Costs one review per namespace on a cache miss, cached per
-identity for `authz.cacheTTL`. On large clusters, see [Known limitations](#known-limitations).
+mapping to maintain.
+
+A resolution costs one review per namespace, so three things guard it:
+
+- results are cached per identity for `authz.cacheTTL` (the cache is bounded and
+  swept, since its keys come from caller-supplied headers);
+- **singleflight** collapses concurrent misses for the same identity — a cold
+  cache under load issues one sweep, not one per in-flight request;
+- the sweep runs 16 reviews in parallel, so latency is roughly
+  `namespaces / 16` round trips rather than `namespaces`.
+
+If any single review fails, the whole resolution fails. A partial answer would
+look like a smaller namespace set — an under-show that then gets cached — so it
+errors instead, and failures are never cached.
 
 ### Cross-namespace visibility
 
@@ -188,7 +200,7 @@ A flow has two endpoints, so any flow touching your namespace reveals the peer's
 namespace name. `proxy.requireBothEndpoints` decides the trade:
 
 | | Behaviour |
-|---|---|
+| --- | --- |
 | `false` (default) | Show it if **either** endpoint is in scope — you see what your namespace talks to, and learn peer namespace names |
 | `true` | Only **intra-scope** traffic, plus traffic to non-namespaced entities (world, host, reserved identities) |
 
@@ -198,7 +210,7 @@ never a match on its own.
 ### Flags
 
 | Flag | Default | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `--listen` | `:8090` | Listen address |
 | `--backend` | `http://hubble-ui-backend:8090` | Upstream hubble-ui backend base URL |
 | `--api-prefix` | `/api` | Paths under this are filtered and require identity; everything else passes through |
@@ -207,6 +219,56 @@ never a match on its own.
 | `--rbac-ttl` | `60s` | Cache TTL for a resolved namespace set |
 | `--channel-ttl` | `10m` | How long per-channel service-map state survives an idle client |
 | `--require-both-endpoints` | `false` | Strict cross-namespace policy |
+| `--metrics-listen` | `:9090` | Serves `/metrics` and `/healthz`; empty disables it |
+| `--shutdown-timeout` | `20s` | Grace period for in-flight requests after SIGTERM |
+
+---
+
+## Observability
+
+Metrics and health are served on a **separate port** (`:9090` by default), never
+on the proxy port. Reaching the proxy port is what authenticates a caller, so
+exposing anything unauthenticated there would widen the trust boundary — and
+scraping it would mean admitting Prometheus through the NetworkPolicy that is
+supposed to admit only the authenticating pod. Scraping therefore needs its own
+rule, `networkPolicy.metricsIngressFrom`; leaving it empty blocks Prometheus.
+
+| Metric | Type | Labels |
+| --- | --- | --- |
+| `hubble_authz_requests_total` | counter | `route`, `outcome` |
+| `hubble_authz_request_duration_seconds` | histogram | `route` |
+| `hubble_authz_events_total` | counter | `kind`, `decision` |
+| `hubble_authz_scope_resolution_seconds` | histogram | `mode` |
+| `hubble_authz_scope_cache_total` | counter | `result` |
+| `hubble_authz_subjectaccessreviews_total` | counter | — |
+| `hubble_authz_tracked_channels` | gauge | — |
+
+All label values come from fixed sets, never from request contents, so a caller
+cannot inflate cardinality. Every known series is exported at zero on startup —
+otherwise a `rate()` over `decision="dropped"` returns no data until the first
+drop, which reads as "the filter isn't running" exactly when it is.
+
+Useful starting points:
+
+```promql
+# Nothing is being filtered — often means every user resolves to an empty scope,
+# or that admins are bypassing.
+sum(rate(hubble_authz_events_total{decision="dropped"}[5m])) == 0
+
+# Callers arriving without identity headers: oauth2-proxy or nginx misconfigured.
+sum(rate(hubble_authz_requests_total{outcome="unauthenticated"}[5m])) > 0
+
+# rbac mode falling out of cache and hammering the API server.
+sum(rate(hubble_authz_subjectaccessreviews_total[5m]))
+```
+
+Set `metrics.serviceMonitor.enabled=true` if you run prometheus-operator.
+
+### Shutdown
+
+The UI holds long-poll requests open, so the proxy drains on SIGTERM rather than
+dropping them — otherwise every rollout surfaces as errors in the browser. Keep
+`proxy.shutdownTimeout` below the pod's `terminationGracePeriodSeconds`.
 
 ---
 

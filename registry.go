@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -84,15 +85,16 @@ func (r *serviceRegistry) sweep() {
 			delete(r.channels, id)
 		}
 	}
+	trackedChannels.Set(float64(len(r.channels)))
 }
 
-// runSweeper sweeps periodically until stop is closed.
-func (r *serviceRegistry) runSweeper(stop <-chan struct{}) {
+// RunSweeper sweeps periodically until ctx is cancelled.
+func (r *serviceRegistry) RunSweeper(ctx context.Context) {
 	t := time.NewTicker(r.ttl)
 	defer t.Stop()
 	for {
 		select {
-		case <-stop:
+		case <-ctx.Done():
 			return
 		case <-t.C:
 			r.sweep()
