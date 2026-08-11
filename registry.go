@@ -30,6 +30,11 @@ type serviceRegistry struct {
 type channelServices struct {
 	lastSeen   time.Time
 	namespaces map[string]string // service ID -> namespace ("" is a real value: world/reserved)
+	// peers holds service IDs outside the caller's scope that are on the far end
+	// of a link from inside it. They are recorded per service rather than per
+	// namespace so that a namespace with ten services only exposes the one
+	// actually talking to the caller.
+	peers map[string]bool
 }
 
 func newServiceRegistry(ttl time.Duration) *serviceRegistry {
@@ -48,13 +53,50 @@ func (r *serviceRegistry) remember(channelID, serviceID, namespace string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	ch := r.channels[channelID]
-	if ch == nil {
-		ch = &channelServices{namespaces: map[string]string{}}
-		r.channels[channelID] = ch
-	}
+	ch := r.channelLocked(channelID)
 	ch.lastSeen = r.now()
 	ch.namespaces[serviceID] = namespace
+}
+
+// channelLocked returns the channel's state, creating it if needed. Caller holds
+// r.mu.
+func (r *serviceRegistry) channelLocked(channelID string) *channelServices {
+	ch := r.channels[channelID]
+	if ch == nil {
+		ch = &channelServices{
+			namespaces: map[string]string{},
+			peers:      map[string]bool{},
+		}
+		r.channels[channelID] = ch
+	}
+	return ch
+}
+
+// rememberPeer records a service the caller may see because it is linked to one
+// inside their scope, even though its own namespace is not.
+func (r *serviceRegistry) rememberPeer(channelID, serviceID string) {
+	if channelID == "" || serviceID == "" {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ch := r.channelLocked(channelID)
+	ch.lastSeen = r.now()
+	ch.peers[serviceID] = true
+}
+
+// isPeer reports whether this service was recorded as linked to the caller's
+// scope on this channel.
+func (r *serviceRegistry) isPeer(channelID, serviceID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ch := r.channels[channelID]
+	if ch == nil {
+		return false
+	}
+	return ch.peers[serviceID]
 }
 
 // lookup returns the namespace recorded for a service ID. The second result

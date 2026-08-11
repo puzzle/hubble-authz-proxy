@@ -107,6 +107,40 @@ func (p *Proxy) filterServiceMapStream(channelID string, body []byte, scope Scop
 		}
 	}
 
+	// Pass 1b: under the lenient policy, a service outside the caller's scope
+	// becomes visible when something inside their scope talks to it — otherwise
+	// the flow table names the peer while the service map has no node to draw,
+	// leaving a link dangling at nothing.
+	//
+	// This does not widen what the caller learns: a visible flow already carries
+	// the peer's namespace, labels, pod name, workloads and identity. The Service
+	// message adds only dns_names, the policy-enforcement flags and a creation
+	// timestamp on a workload they can already see.
+	//
+	// Strict mode deliberately does not do this: hiding foreign namespaces
+	// entirely is the whole point of --require-both-endpoints.
+	if !p.requireBoth {
+		for _, ev := range resp.GetEvents() {
+			link := ev.GetServiceLinkState().GetServiceLink()
+			if link == nil {
+				continue
+			}
+			srcNS, srcKnown := p.services.lookup(channelID, link.GetSourceId())
+			dstNS, dstKnown := p.services.lookup(channelID, link.GetDestinationId())
+			if !srcKnown || !dstKnown {
+				continue
+			}
+			// Exactly one end inside scope makes the other end a peer. Two
+			// foreign services linked to each other stay invisible.
+			if scope.Namespaces[srcNS] && !scope.Namespaces[dstNS] {
+				p.services.rememberPeer(channelID, link.GetDestinationId())
+			}
+			if scope.Namespaces[dstNS] && !scope.Namespaces[srcNS] {
+				p.services.rememberPeer(channelID, link.GetSourceId())
+			}
+		}
+	}
+
 	// Pass 2: keep what the caller may see.
 	kept := make([]*uipb.Event, 0, len(resp.GetEvents()))
 	for _, ev := range resp.GetEvents() {
@@ -171,7 +205,12 @@ func (p *Proxy) eventVisible(channelID string, ev *uipb.Event, scope Scope) (*ui
 		return ev, allowed[e.NamespaceState.GetNamespace().GetName()]
 
 	case *uipb.Event_ServiceState:
-		return ev, allowed[e.ServiceState.GetService().GetNamespace()]
+		svc := e.ServiceState.GetService()
+		if allowed[svc.GetNamespace()] {
+			return ev, true
+		}
+		// A peer of something in scope: see the peer-learning pass above.
+		return ev, !both && p.services.isPeer(channelID, svc.GetId())
 
 	case *uipb.Event_ServiceLinkState:
 		link := e.ServiceLinkState.GetServiceLink()

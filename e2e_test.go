@@ -99,12 +99,13 @@ func writeFixtures(t *testing.T, dir string) {
 
 	a1 := endpoint(nsA, "frontend", 1001)
 	a2 := endpoint(nsA, "backend", 1002)
-	b1 := endpoint(nsB, "secret-svc", 2001)
+	b1 := endpoint(nsB, "peer-svc", 2001)     // foreign, but talks to us
+	b2 := endpoint(nsB, "isolated-svc", 2002) // foreign, never talks to us
 
 	flows := []*observerpb.GetFlowsResponse{
 		flowBetween(a1, a2), // wholly in scope
 		flowBetween(a1, b1), // in scope -> out of scope: the requireBoth case
-		flowBetween(b1, b1), // wholly out of scope: must never be visible
+		flowBetween(b2, b1), // wholly out of scope: must never be visible
 	}
 	// Repeat so the backend has enough to aggregate into stable services/links.
 	var sb strings.Builder
@@ -208,6 +209,7 @@ func startProxy(t *testing.T, backendURL string, authz Authorizer, requireBoth b
 type collected struct {
 	namespaces  map[string]bool
 	serviceNS   map[string]bool
+	serviceName map[string]bool
 	linkNS      map[string]bool // "src->dst" namespace pairs, resolved by us
 	serviceByID map[string]string
 	flowNS      map[string]bool
@@ -225,7 +227,8 @@ func drive(t *testing.T, proxyURL string, headers map[string]string, polls int) 
 
 	got := &collected{
 		namespaces: map[string]bool{}, serviceNS: map[string]bool{},
-		linkNS: map[string]bool{}, serviceByID: map[string]string{},
+		serviceName: map[string]bool{},
+		linkNS:      map[string]bool{}, serviceByID: map[string]string{},
 		flowNS: map[string]bool{}, flowPairs: map[string]bool{},
 	}
 
@@ -306,7 +309,9 @@ func absorb(got *collected, resp *uipb.GetEventsResponse) {
 		case ev.GetNamespaceState() != nil:
 			got.namespaces[ev.GetNamespaceState().GetNamespace().GetName()] = true
 		case ev.GetServiceState() != nil:
-			got.serviceNS[ev.GetServiceState().GetService().GetNamespace()] = true
+			svc := ev.GetServiceState().GetService()
+			got.serviceNS[svc.GetNamespace()] = true
+			got.serviceName[svc.GetName()] = true
 		case ev.GetServiceLinkState() != nil:
 			l := ev.GetServiceLinkState().GetServiceLink()
 			got.linkNS[got.serviceByID[l.GetSourceId()]+"->"+got.serviceByID[l.GetDestinationId()]] = true
@@ -378,8 +383,9 @@ func TestE2EServiceMapIsScoped(t *testing.T) {
 		"X-Auth-Request-Groups": "team-a",
 	}, 40)
 
-	t.Logf("services=%v links=%v flowPairs=%v statuses=%d",
-		keys(got.serviceNS), keys(got.linkNS), keys(got.flowPairs), got.statuses)
+	t.Logf("serviceNS=%v names=%v links=%v flowPairs=%v statuses=%d",
+		keys(got.serviceNS), keys(got.serviceName), keys(got.linkNS),
+		keys(got.flowPairs), got.statuses)
 
 	if len(got.flowPairs) == 0 && len(got.serviceNS) == 0 {
 		t.Fatal("saw nothing at all; the fixture or preset wiring is wrong")
@@ -390,11 +396,24 @@ func TestE2EServiceMapIsScoped(t *testing.T) {
 	if got.flowPairs[nsB+"->"+nsB] {
 		t.Errorf("a wholly out-of-scope flow (%s->%s) reached the caller", nsB, nsB)
 	}
-	if got.serviceNS[nsB] {
-		t.Errorf("a service from %q reached a caller scoped to %q", nsB, nsA)
-	}
 	if got.linkNS[nsB+"->"+nsB] {
 		t.Errorf("a wholly out-of-scope link (%s->%s) was visible", nsB, nsB)
+	}
+
+	// The peer rule: a foreign service linked to our scope IS shown, so the map
+	// can draw the edge the flow table already names...
+	if !got.serviceName["peer-svc"] {
+		t.Error("the foreign service linked to our scope was not shown; " +
+			"its edge would dangle at nothing")
+	}
+	// ...but only that one. A foreign service that never talks to us must stay
+	// hidden, or the rule degenerates into exposing whole namespaces.
+	if got.serviceName["isolated-svc"] {
+		t.Error("a foreign service with no link into our scope was exposed")
+	}
+	// And the edge must now resolve at both ends, which is the whole point.
+	if !got.linkNS[nsA+"->"+nsB] {
+		t.Errorf("the cross-namespace link did not resolve: %v", keys(got.linkNS))
 	}
 
 	// And the lenient policy's defining behaviour: traffic with one end in scope
@@ -416,8 +435,8 @@ func TestE2ERequireBothEndpointsDropsCrossNamespace(t *testing.T) {
 		"X-Auth-Request-Email": "bob@example.com",
 	}, 40)
 
-	t.Logf("strict: services=%v links=%v flowPairs=%v",
-		keys(got.serviceNS), keys(got.linkNS), keys(got.flowPairs))
+	t.Logf("strict: serviceNS=%v names=%v links=%v flowPairs=%v",
+		keys(got.serviceNS), keys(got.serviceName), keys(got.linkNS), keys(got.flowPairs))
 
 	if got.flowPairs[nsA+"->"+nsB] || got.flowPairs[nsB+"->"+nsA] {
 		t.Errorf("strict mode kept a cross-namespace flow: %v", keys(got.flowPairs))
@@ -426,7 +445,7 @@ func TestE2ERequireBothEndpointsDropsCrossNamespace(t *testing.T) {
 		t.Errorf("strict mode leaked a wholly foreign flow")
 	}
 	if got.serviceNS[nsB] {
-		t.Errorf("strict mode leaked a service in %q", nsB)
+		t.Errorf("strict mode leaked a service in %q; peers are lenient-only", nsB)
 	}
 }
 
@@ -442,7 +461,7 @@ func TestE2EAdminSeesEverything(t *testing.T) {
 	}, 40)
 
 	t.Logf("admin: services=%v flowPairs=%v", keys(got.serviceNS), keys(got.flowPairs))
-	if !got.flowPairs[nsB+"->"+nsB] && !got.serviceNS[nsB] {
+	if !got.serviceName["isolated-svc"] && !got.serviceNS[nsB] {
 		t.Errorf("admin saw nothing from %q; filtering was applied to an unrestricted caller", nsB)
 	}
 }

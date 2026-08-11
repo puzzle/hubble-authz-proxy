@@ -49,7 +49,7 @@ The backend serves two routes, both carrying protobuf payloads inside a
 | `control-stream` | `NamespaceState` | Only namespaces in scope, so the picker can't enumerate the cluster |
 | `control-stream` | `Notification` | Passed through — cluster-wide status, but see [Known limitations](#known-limitations) |
 | `service-map-stream` | `Flow`, `Flows` | Dropped unless an endpoint is in scope |
-| `service-map-stream` | `ServiceState` | Dropped unless `service.namespace` is in scope |
+| `service-map-stream` | `ServiceState` | Kept when in scope, or when linked to something in scope (lenient only) |
 | `service-map-stream` | `ServiceLinkState` | Both endpoint services resolved to namespaces, then the same rule |
 | *anything else* | — | **Refused** (502), never forwarded |
 
@@ -62,6 +62,13 @@ ID. Two consequences worth knowing:
   each response is processed in two passes.
 - An edge whose endpoints were never announced is **dropped**, not shown. An
   unknown endpoint could be anywhere.
+- Under the lenient policy, a service *outside* your scope is shown once
+  something inside your scope links to it — otherwise the flow table names the
+  peer while the map has no node to draw, and the edge dangles at nothing. Only
+  the linked service is exposed, not its whole namespace, and strict mode does
+  not do this at all. It reveals nothing new: a visible flow already carries the
+  peer's namespace, labels, pod name, workloads and identity, so the `Service`
+  adds only `dns_names`, the policy-enforcement flags and a creation timestamp.
 
 ---
 

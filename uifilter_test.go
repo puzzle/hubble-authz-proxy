@@ -274,3 +274,86 @@ func TestFilterEmptyBodyPassesThrough(t *testing.T) {
 		t.Errorf("empty body: got %v, %v", got, err)
 	}
 }
+
+// A service outside the caller's scope becomes visible once something inside
+// their scope links to it. Without this the flow table names the peer (flows
+// carry the full endpoint) while the service map has no node to draw it, so the
+// edge dangles — which is what a real deployment surfaced.
+func TestFilterPeerServiceBecomesVisible(t *testing.T) {
+	p := testProxy(false)
+	scope := scopeOf("mealie")
+
+	got := filterEvents(t, p, "ch1", scope,
+		svcEvent("svc-mealie", "mealie"),
+		svcEvent("svc-traefik", "traefik"),           // foreign...
+		linkEvent("l1", "svc-traefik", "svc-mealie"), // ...but talks to us
+	)
+
+	var seen []string
+	for _, ev := range got {
+		if s := ev.GetServiceState().GetService(); s != nil {
+			seen = append(seen, s.GetNamespace())
+		}
+	}
+	if len(seen) != 2 {
+		t.Fatalf("services kept = %v, want both mealie and its traefik peer", seen)
+	}
+}
+
+// Only the service actually linked becomes visible, not everything sharing its
+// namespace: a busy ingress namespace should not be exposed wholesale.
+func TestFilterPeerVisibilityIsPerService(t *testing.T) {
+	p := testProxy(false)
+	scope := scopeOf("mealie")
+
+	got := filterEvents(t, p, "ch1", scope,
+		svcEvent("svc-mealie", "mealie"),
+		svcEvent("svc-traefik", "traefik"),
+		svcEvent("svc-traefik-other", "traefik"), // same namespace, no link to us
+		linkEvent("l1", "svc-traefik", "svc-mealie"),
+	)
+
+	for _, ev := range got {
+		if s := ev.GetServiceState().GetService(); s != nil && s.GetId() == "svc-traefik-other" {
+			t.Error("an unrelated service in the peer's namespace was exposed")
+		}
+	}
+}
+
+// Two services both outside scope, linked to each other, stay invisible.
+func TestFilterPeerRequiresAnEndpointInScope(t *testing.T) {
+	p := testProxy(false)
+	scope := scopeOf("mealie")
+
+	got := filterEvents(t, p, "ch1", scope,
+		svcEvent("svc-a", "other-a"),
+		svcEvent("svc-b", "other-b"),
+		linkEvent("l1", "svc-a", "svc-b"),
+	)
+
+	for _, ev := range got {
+		if s := ev.GetServiceState().GetService(); s != nil {
+			t.Errorf("foreign service %q in %q leaked via a foreign-to-foreign link",
+				s.GetId(), s.GetNamespace())
+		}
+	}
+}
+
+// Strict mode must not gain peers: hiding foreign namespaces entirely is the
+// point of --require-both-endpoints.
+func TestFilterStrictModeHasNoPeers(t *testing.T) {
+	p := testProxy(true)
+	scope := scopeOf("mealie")
+
+	got := filterEvents(t, p, "ch1", scope,
+		svcEvent("svc-mealie", "mealie"),
+		svcEvent("svc-traefik", "traefik"),
+		linkEvent("l1", "svc-traefik", "svc-mealie"),
+	)
+
+	for _, ev := range got {
+		if s := ev.GetServiceState().GetService(); s != nil && s.GetNamespace() == "traefik" {
+			t.Error("strict mode exposed a peer service")
+		}
+	}
+}
