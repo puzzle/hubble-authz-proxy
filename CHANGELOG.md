@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/splattner/hubble-authz-proxy/compare/v0.1.0...v0.1.1) (2026-08-11)
+
+
+### Bug Fixes
+
+* build the image without QEMU emulation ([e8c22b7](https://github.com/splattner/hubble-authz-proxy/commit/e8c22b72a11b473607ace9bd4188b3d24eee4672))
+
 ## [0.1.0](https://github.com/splattner/hubble-authz-proxy/compare/v0.0.1...v0.1.0) (2026-08-11)
 
 
