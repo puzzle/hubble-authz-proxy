@@ -207,6 +207,54 @@ func TestEndToEndUnknownRouteFailsClosed(t *testing.T) {
 	}
 }
 
+// The backend's long-poll handshake: the channel is open but has no data yet, so
+// it answers with an empty body and asks the client to poll again. Observed
+// verbatim from a real cluster:
+//
+//	{"meta":{"trace_id":"…","channel_id":"…","route_name":"control-stream",
+//	         "is_not_ready":true,"poll_delay_ms":200,"is_empty":true},"body":{}}
+//
+// These must survive untouched. Filtering them into an error would stall the
+// UI's poll loop, and the poll metadata is what tells the client to come back.
+func TestEndToEndNotReadyPollPassesThrough(t *testing.T) {
+	notReady := &cppb.Message{
+		Meta: &cppb.Meta{
+			TraceId:     "cfe1b42f578d7ef9",
+			ChannelId:   "58a10da31d4e39f9",
+			RouteName:   routeControlStream,
+			IsNotReady:  true,
+			IsEmpty:     true,
+			PollDelayMs: 200,
+		},
+		Body: &cppb.Body{},
+	}
+
+	authz := fakeAuthorizer{scope: scopeOf("payments")}
+	srv := newStack(t, authz, false, notReady, true)
+
+	resp := post(t, srv, "/api/control-stream", map[string]string{
+		"X-Auth-Request-Email": "bob@example.com",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := decodeEnvelope(raw, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !got.GetMeta().GetIsNotReady() || got.GetMeta().GetPollDelayMs() != 200 {
+		t.Errorf("poll metadata lost: %+v", got.GetMeta())
+	}
+	if got.GetMeta().GetChannelId() != "58a10da31d4e39f9" {
+		t.Errorf("channel id lost: %q", got.GetMeta().GetChannelId())
+	}
+}
+
 // Paths outside the API prefix are not namespace-bearing and must pass through
 // without requiring identity, so health checks keep working.
 func TestNonAPIPathsPassThrough(t *testing.T) {
