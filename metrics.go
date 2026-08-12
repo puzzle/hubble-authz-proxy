@@ -9,6 +9,30 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// Request outcomes. Declared once and referenced from both the call sites and
+// the pre-initialisation below: adding one without exporting it at zero makes
+// alerts on it silently useless, which is exactly what happened when
+// client_gone and upstream_error were introduced.
+const (
+	outcomeFiltered        = "filtered"
+	outcomeUnauthenticated = "unauthenticated"
+	outcomeAuthzError      = "authz_error"
+	outcomeClientGone      = "client_gone"
+	outcomeUpstreamError   = "upstream_error"
+	// passthrough is the one outcome not tied to an API route.
+	outcomePassthrough = "passthrough"
+	routeNone          = "-"
+)
+
+// requestOutcomes is every outcome reported against a route.
+var requestOutcomes = []string{
+	outcomeFiltered,
+	outcomeUnauthenticated,
+	outcomeAuthzError,
+	outcomeClientGone,
+	outcomeUpstreamError,
+}
+
 // Metrics are served on their own listener, never on the proxy port. The proxy
 // port is the trusted path — reaching it is what authenticates a caller — so
 // exposing an unauthenticated /metrics there would widen that surface, and
@@ -82,14 +106,13 @@ func metricsRegistry() *prometheus.Registry {
 // data rather than 0 until something is actually dropped — which reads as "the
 // filter is not running" exactly when it is running correctly.
 func initLabelCombinations() {
-	routes := []string{routeControlStream, routeServiceMapStre, "other"}
-	for _, route := range routes {
-		for _, outcome := range []string{"filtered", "unauthenticated", "authz_error"} {
+	for _, route := range knownRoutes {
+		for _, outcome := range requestOutcomes {
 			requestsTotal.WithLabelValues(route, outcome)
 		}
 		requestDuration.WithLabelValues(route)
 	}
-	requestsTotal.WithLabelValues("-", "passthrough")
+	requestsTotal.WithLabelValues(routeNone, outcomePassthrough)
 
 	kinds := []string{
 		"flow", "flows", "namespace_state",

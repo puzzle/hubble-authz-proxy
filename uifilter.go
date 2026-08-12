@@ -18,6 +18,12 @@ const (
 
 var errUnknownRoute = fmt.Errorf("unknown backend route")
 
+// knownRoutes is the closed set of route label values.
+var knownRoutes = []string{routeControlStream, routeServiceMapStre, routeOther}
+
+// routeOther is the catch-all for any path we do not recognise.
+const routeOther = "other"
+
 // knownRoute maps an arbitrary path segment onto a fixed label set. Metric
 // labels must never be caller-controlled, or anyone able to reach the proxy can
 // exhaust its memory with unique time series.
@@ -26,7 +32,7 @@ func knownRoute(s string) string {
 	case routeControlStream, routeServiceMapStre:
 		return name
 	default:
-		return "other"
+		return routeOther
 	}
 }
 
