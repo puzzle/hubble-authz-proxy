@@ -184,6 +184,16 @@ proxy:
   requireBothEndpoints: false
   # -- How long per-channel service-map state is kept after a client goes idle.
   channelTTL: 10m
+  # -- debug | info | warn | error
+  #
+  # debug logs the identity and resolved scope of every request, which is the
+  # fastest way to answer "why does this user see nothing" — it distinguishes
+  # headers not arriving from a mapping that does not match. It names users, so
+  # treat the logs accordingly.
+  logLevel: info
+  # -- text | json
+  logFormat: text
+
   # -- How long in-flight requests get to finish after SIGTERM. The UI holds
   # long-poll requests open, so cutting them short surfaces as browser errors
   # during every rollout. Keep below terminationGracePeriodSeconds.

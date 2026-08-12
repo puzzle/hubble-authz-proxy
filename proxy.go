@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -34,6 +34,7 @@ type Proxy struct {
 	requireBoth bool
 	apiPrefix   string
 	headers     identityHeaders
+	log         *slog.Logger
 }
 
 type ctxKey int
@@ -52,13 +53,17 @@ type reqInfo struct {
 	scope    Scope
 }
 
-func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefix string, requireBoth bool, identityPrefix string) *Proxy {
+func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefix string, requireBoth bool, identityPrefix string, logger *slog.Logger) *Proxy {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	p := &Proxy{
 		authz:       authz,
 		services:    reg,
 		requireBoth: requireBoth,
 		apiPrefix:   apiPrefix,
 		headers:     newIdentityHeaders(identityPrefix),
+		log:         logger,
 	}
 	p.rp = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -69,10 +74,24 @@ func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefi
 			r.Out.Header.Set("Accept-Encoding", "identity")
 		},
 		ModifyResponse: p.filterResponse,
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, err error) {
+		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
 			// Reached both for upstream failures and for a filter that refused
 			// to vouch for a response, so this must not leak the body.
-			log.Printf("proxy error: %v", err)
+			route := knownRoute(strings.TrimPrefix(r.URL.Path, apiPrefix))
+
+			if clientGone(err) {
+				// The caller left; there is nobody to send a status to. Counted
+				// rather than dropped: the rate matters even though any single
+				// occurrence is unremarkable. See clientGone.
+				requestsTotal.WithLabelValues(route, "client_gone").Inc()
+				p.log.Debug("client disconnected before the response completed",
+					"route", route, "path", r.URL.Path, "err", err)
+				return
+			}
+
+			requestsTotal.WithLabelValues(route, "upstream_error").Inc()
+			p.log.Error("refusing to serve response",
+				"route", route, "path", r.URL.Path, "err", err)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 		},
 	}
@@ -99,6 +118,14 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	id, err := p.headers.from(r)
 	if err != nil {
 		requestsTotal.WithLabelValues(route, "unauthenticated").Inc()
+		// Name the headers rather than the values, and say explicitly when the
+		// other family is present: a prefix mismatch otherwise looks exactly
+		// like an authenticator that is not running at all.
+		p.log.Warn("no identity on request",
+			"route", route,
+			"expecting", p.headers.email+" (and -User/-Groups)",
+			"present", p.headers.presentIn(r),
+			"other_family_present", p.headers.otherFamilyIn(r))
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
@@ -106,10 +133,25 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	scope, err := p.authz.AllowedNamespaces(r.Context(), id)
 	if err != nil {
 		requestsTotal.WithLabelValues(route, "authz_error").Inc()
-		log.Printf("resolve namespaces for %q: %v", id.Email, err)
+		if clientGone(err) {
+			p.log.Debug("caller left while their scope was being resolved",
+				"route", route, "user", id.Email)
+			return
+		}
+		p.log.Error("cannot resolve allowed namespaces",
+			"user", id.Email, "groups", id.Groups, "err", err)
 		http.Error(w, "authorization backend unavailable", http.StatusInternalServerError)
 		return
 	}
+
+	// The single most useful line when someone reports seeing nothing: it shows
+	// the identity that actually arrived and what it resolved to.
+	p.log.Debug("request authorized",
+		"route", route,
+		"user", cmpOr(id.Email, id.User),
+		"groups", id.Groups,
+		"unrestricted", scope.All,
+		"namespaces", len(scope.Namespaces))
 
 	requestsTotal.WithLabelValues(route, "filtered").Inc()
 	ctx := context.WithValue(r.Context(), reqInfoCtxKey, reqInfo{filtered: true, scope: scope})

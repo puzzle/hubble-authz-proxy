@@ -23,9 +23,10 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -49,15 +50,22 @@ func main() {
 		channelTTL    = flag.Duration("channel-ttl", 10*time.Minute, "how long to keep per-channel service-map state after a client goes idle")
 		reqBoth       = flag.Bool("require-both-endpoints", false, "only show traffic when BOTH endpoints are in allowed namespaces (stricter)")
 		shutdownGrace = flag.Duration("shutdown-timeout", 20*time.Second, "how long to let in-flight requests finish after SIGTERM")
+		logLevel      = flag.String("log-level", "info", "debug | info | warn | error. debug logs the identity and resolved scope of every request")
+		logFormat     = flag.String("log-format", "text", "text | json")
 	)
 	flag.Parse()
 
+	logger := newLogger(*logLevel, *logFormat)
+	slog.SetDefault(logger)
+
 	backend, err := url.Parse(*backendURL)
 	if err != nil {
-		log.Fatalf("parse -backend: %v", err)
+		logger.Error("cannot parse -backend", "value", *backendURL, "err", err)
+		os.Exit(1)
 	}
 	if backend.Scheme == "" || backend.Host == "" {
-		log.Fatalf("-backend must be an absolute URL, got %q", *backendURL)
+		logger.Error("-backend must be an absolute URL", "value", *backendURL)
+		os.Exit(1)
 	}
 
 	// Cancelled on SIGTERM/SIGINT. Kubernetes sends SIGTERM and then removes the
@@ -82,14 +90,15 @@ func main() {
 		err = errors.New("unknown -authz mode (want static|rbac)")
 	}
 	if err != nil {
-		log.Fatalf("authorizer: %v", err)
+		logger.Error("cannot start authorizer", "mode", *mode, "err", err)
+		os.Exit(1)
 	}
 	authz = instrumentedAuthorizer{next: authz, mode: *mode}
 
 	reg := newServiceRegistry(*channelTTL)
 	go reg.RunSweeper(ctx)
 
-	proxy := NewProxy(backend, authz, reg, *apiPrefix, *reqBoth, *identityPfx)
+	proxy := NewProxy(backend, authz, reg, *apiPrefix, *reqBoth, *identityPfx, logger)
 
 	srv := &http.Server{
 		Addr:              *listen,
@@ -106,13 +115,20 @@ func main() {
 		}
 		go func() {
 			if err := metricsSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				log.Printf("metrics listener: %v", err)
+				logger.Error("metrics listener stopped", "err", err)
 			}
 		}()
 	}
 
-	log.Printf("hubble-authz-proxy %s: listen=%s metrics=%s backend=%s authz=%s requireBoth=%v identityHeaders=%s-*",
-		version, *listen, *metricsListen, backend, *mode, *reqBoth, *identityPfx)
+	logger.Info("starting",
+		"version", version,
+		"listen", *listen,
+		"metrics", *metricsListen,
+		"backend", backend.String(),
+		"authz", *mode,
+		"requireBothEndpoints", *reqBoth,
+		"identityHeaders", *identityPfx+"-*",
+		"logLevel", *logLevel)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()
@@ -120,10 +136,11 @@ func main() {
 	select {
 	case err := <-serveErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatalf("serve: %v", err)
+			logger.Error("serve failed", "err", err)
+			os.Exit(1)
 		}
 	case <-ctx.Done():
-		log.Printf("signal received, draining for up to %s", *shutdownGrace)
+		logger.Info("signal received, draining", "timeout", shutdownGrace.String())
 	}
 
 	// Detached from ctx, which is already cancelled by the signal.
@@ -131,12 +148,12 @@ func main() {
 	defer cancel()
 
 	if err := srv.Shutdown(shutdownCtx); err != nil {
-		log.Printf("proxy shutdown: %v", err)
+		logger.Error("proxy shutdown", "err", err)
 	}
 	if metricsSrv != nil {
 		if err := metricsSrv.Shutdown(shutdownCtx); err != nil {
-			log.Printf("metrics shutdown: %v", err)
+			logger.Error("metrics shutdown", "err", err)
 		}
 	}
-	log.Print("stopped")
+	logger.Info("stopped")
 }
