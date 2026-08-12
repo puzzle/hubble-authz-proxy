@@ -51,7 +51,7 @@ func newStack(t *testing.T, authz Authorizer, requireBoth bool, msg *cppb.Messag
 	if err != nil {
 		t.Fatal(err)
 	}
-	front := httptest.NewServer(NewProxy(u, authz, newServiceRegistry(time.Minute), "/api", requireBoth, AuthRequestPrefix))
+	front := httptest.NewServer(NewProxy(u, authz, newServiceRegistry(time.Minute), "/api", requireBoth, AuthRequestPrefix, testLogger()))
 	t.Cleanup(front.Close)
 	return front
 }
@@ -265,7 +265,7 @@ func TestNonAPIPathsPassThrough(t *testing.T) {
 	u, _ := url.Parse(backend.URL)
 
 	front := httptest.NewServer(NewProxy(u, fakeAuthorizer{scope: scopeOf("payments")},
-		newServiceRegistry(time.Minute), "/api", false, AuthRequestPrefix))
+		newServiceRegistry(time.Minute), "/api", false, AuthRequestPrefix, testLogger()))
 	t.Cleanup(front.Close)
 
 	resp := post(t, front, "/healthz", nil)

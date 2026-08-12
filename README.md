@@ -363,6 +363,8 @@ never a match on its own.
 | `--channel-ttl` | `10m` | How long per-channel service-map state survives an idle client |
 | `--require-both-endpoints` | `false` | Strict cross-namespace policy |
 | `--metrics-listen` | `:9090` | Serves `/metrics` and `/healthz`; empty disables it |
+| `--log-level` | `info` | `debug` logs the identity and resolved scope of every request |
+| `--log-format` | `text` | `text` or `json` |
 | `--shutdown-timeout` | `20s` | Grace period for in-flight requests after SIGTERM |
 
 ---
@@ -406,6 +408,47 @@ sum(rate(hubble_authz_subjectaccessreviews_total[5m]))
 ```
 
 Set `metrics.serviceMonitor.enabled=true` if you run prometheus-operator.
+
+### Diagnosing "this user sees nothing"
+
+Almost every report comes down to one of two things, and `--log-level=debug`
+separates them in one line:
+
+```console
+level=DEBUG msg="request authorized" route=control-stream user=bob@example.com \
+  groups="[team-a team-b]" unrestricted=false namespaces=1
+```
+
+Identity arrived and resolved — so an empty UI means the *mapping* is wrong.
+Whereas:
+
+```console
+level=WARN msg="no identity on request" expecting="X-Auth-Request-Email (…)" \
+  present=[] other_family_present="[X-Forwarded-Email X-Forwarded-Groups]"
+```
+
+says the authenticator is running but emitting the **other header family**, which
+is the single likeliest misconfiguration (see
+`--identity-header-prefix`). An empty `other_family_present` instead means no
+authenticator is putting headers on the request at all.
+
+Note debug logs name users; it is a deliberate trade for diagnosability.
+
+**Client disconnects are classified, not hidden.** The UI holds several
+long-polls open and aborts them on reload, navigation and namespace switches, so
+individual disconnects say nothing and are logged at debug. What matters is the
+*rate*:
+
+```promql
+# Callers abandoning requests. A sustained rise means something upstream is
+# stalling them — a load balancer, the ingress, the network — not this proxy.
+sum(rate(hubble_authz_requests_total{outcome="client_gone"}[5m]))
+
+# The proxy could not vouch for a response and refused to serve it.
+sum(rate(hubble_authz_requests_total{outcome="upstream_error"}[5m]))
+```
+
+Alert on those rates, not on individual log lines.
 
 ### Shutdown
 
