@@ -1,6 +1,8 @@
-# hubble-authz-proxy
+<!-- markdownlint-disable MD041 -->
+![hubble-authz-proxy](doc/images/hubble-authz-proxy-logo.svg)
 
 [![PR Quality](https://github.com/splattner/hubble-authz-proxy/actions/workflows/pr-quality.yml/badge.svg)](https://github.com/splattner/hubble-authz-proxy/actions/workflows/pr-quality.yml)
+[![E2E](https://github.com/splattner/hubble-authz-proxy/actions/workflows/e2e.yml/badge.svg)](https://github.com/splattner/hubble-authz-proxy/actions/workflows/e2e.yml)
 [![Release Please](https://github.com/splattner/hubble-authz-proxy/actions/workflows/release-please.yml/badge.svg)](https://github.com/splattner/hubble-authz-proxy/actions/workflows/release-please.yml)
 
 Namespace-scoped authorization for the **Hubble UI** on **Cilium OSS**.

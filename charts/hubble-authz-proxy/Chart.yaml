@@ -4,6 +4,8 @@ description: Namespace-scoped authorization proxy for the Hubble UI
 type: application
 version: 0.3.0
 appVersion: 0.3.0
+# Must be an absolute URL: chart registries render this without repo context.
+icon: https://raw.githubusercontent.com/splattner/hubble-authz-proxy/main/doc/images/hubble-authz-proxy-mark.png
 home: https://github.com/splattner/hubble-authz-proxy
 sources:
   - https://github.com/splattner/hubble-authz-proxy

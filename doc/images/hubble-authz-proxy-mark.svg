@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none">
+<defs>
+  <linearGradient id="lens" x1="183" y1="175" x2="334" y2="340" gradientUnits="userSpaceOnUse">
+    <stop stop-color="#57C6E1"/>
+    <stop offset="0.55" stop-color="#4A90E2"/>
+    <stop offset="1" stop-color="#8065C8"/>
+  </linearGradient>
+  <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+    <feDropShadow dx="0" dy="10" stdDeviation="10" flood-color="#000000" flood-opacity=".16"/>
+  </filter>
+</defs>
+
+<!-- Hubble-adjacent instrument / panel geometry -->
+<g filter="url(#shadow)">
+  <!-- panel stems -->
+  <path d="M199 203L151 151" stroke="#171A24" stroke-width="20" stroke-linecap="round"/>
+  <path d="M313 203L361 151" stroke="#171A24" stroke-width="20" stroke-linecap="round"/>
+  <path d="M199 309L149 361" stroke="#171A24" stroke-width="20" stroke-linecap="round"/>
+  <path d="M313 309L363 361" stroke="#171A24" stroke-width="20" stroke-linecap="round"/>
+
+  <!-- top green panels -->
+  <path d="M82 78L170 97L191 154L111 137Z" fill="#A6CE39" stroke="#171A24" stroke-width="12" stroke-linejoin="round"/>
+  <path d="M342 97L430 78L401 137L321 154Z" fill="#7FB942" stroke="#171A24" stroke-width="12" stroke-linejoin="round"/>
+
+  <!-- lower blue / purple panels -->
+  <path d="M111 375L191 358L170 415L82 434Z" fill="#4A90E2" stroke="#171A24" stroke-width="12" stroke-linejoin="round"/>
+  <path d="M321 358L401 375L430 434L342 415Z" fill="#8065C8" stroke="#171A24" stroke-width="12" stroke-linejoin="round"/>
+
+  <!-- panel grid hints: enough to feel technical, not a trace of upstream -->
+  <path d="M126 89L137 142M154 95L165 148M358 148L369 95M386 142L397 89" stroke="#171A24" stroke-width="5" opacity=".55"/>
+  <path d="M126 423L137 370M154 417L165 364M358 364L369 417M386 370L397 423" stroke="#171A24" stroke-width="5" opacity=".55"/>
+
+  <!-- central cylindrical hub -->
+  <path d="M181 187C181 166 198 149 219 149H293C314 149 331 166 331 187V325C331 346 314 363 293 363H219C198 363 181 346 181 325V187Z" fill="#171A24"/>
+  <rect x="194" y="162" width="124" height="188" rx="45" fill="#242938" stroke="#343B4F" stroke-width="7"/>
+
+  <!-- observability lens -->
+  <circle cx="256" cy="256" r="76" fill="#10131B" stroke="url(#lens)" stroke-width="17"/>
+  <circle cx="256" cy="256" r="52" fill="#202536" stroke="#3C455E" stroke-width="6"/>
+
+  <!-- authorization shield inside lens -->
+  <path d="M256 211C270 222 284 226 301 230V256C301 287 283 311 256 326C229 311 211 287 211 256V230C228 226 242 222 256 211Z"
+        fill="#FFFFFF" fill-opacity=".96"/>
+  <path d="M237 263L251 277L279 245" stroke="#7FB942" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <!-- antenna / node: a recognizable observability/network cue -->
+  <path d="M315 177L368 124" stroke="#171A24" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="384" cy="108" r="17" fill="#F7941D" stroke="#171A24" stroke-width="9"/>
+
+  <!-- proxy filtering cue: several flows in, one authorized flow out -->
+  <path d="M39 220H158" stroke="#E4524D" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="39" cy="220" r="10" fill="#E4524D"/>
+  <path d="M28 256H158" stroke="#F7941D" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="28" cy="256" r="10" fill="#F7941D"/>
+  <path d="M39 292H158" stroke="#4A90E2" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="39" cy="292" r="10" fill="#4A90E2"/>
+  <path d="M354 256H474" stroke="#57C6E1" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="474" cy="256" r="11" fill="#57C6E1"/>
+
+  <!-- tiny stop bars imply dropped flows without clutter -->
+  <path d="M142 207L158 223M158 207L142 223" stroke="#171A24" stroke-width="7" stroke-linecap="round"/>
+  <path d="M142 279L158 295M158 279L142 295" stroke="#171A24" stroke-width="7" stroke-linecap="round"/>
+</g>
+</svg>
