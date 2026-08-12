@@ -2,6 +2,28 @@ apiVersion: v1
 entries:
   hubble-authz-proxy:
   - apiVersion: v2
+    appVersion: 0.4.0
+    created: "2026-08-12T07:19:05.45498757Z"
+    description: Namespace-scoped authorization proxy for the Hubble UI
+    digest: 1b54a2861cf2d94d052ea4db61b2e79f7b989dc580af35d3538b0afb95a52217
+    home: https://github.com/splattner/hubble-authz-proxy
+    icon: https://raw.githubusercontent.com/splattner/hubble-authz-proxy/main/doc/images/hubble-authz-proxy-mark.png
+    keywords:
+    - cilium
+    - hubble
+    - authorization
+    - multi-tenancy
+    maintainers:
+    - name: splattner
+      url: https://github.com/splattner
+    name: hubble-authz-proxy
+    sources:
+    - https://github.com/splattner/hubble-authz-proxy
+    type: application
+    urls:
+    - hubble-authz-proxy-0.4.0.tgz
+    version: 0.4.0
+  - apiVersion: v2
     appVersion: 0.3.0
     created: "2026-08-11T21:02:05.284041915Z"
     description: Namespace-scoped authorization proxy for the Hubble UI
@@ -85,4 +107,4 @@ entries:
     urls:
     - hubble-authz-proxy-0.1.0.tgz
     version: 0.1.0
-generated: "2026-08-11T21:02:05.284062083Z"
+generated: "2026-08-12T07:19:05.455005627Z"
