@@ -19,6 +19,10 @@ const (
 	outcomeAuthzError      = "authz_error"
 	outcomeClientGone      = "client_gone"
 	outcomeUpstreamError   = "upstream_error"
+	// responseTooLarge is separate from upstream_error because it is a limit we
+	// chose, not a fault: seeing it means --max-response-bytes needs raising, or
+	// the cluster outgrew what one response can carry.
+	outcomeResponseTooLarge = "response_too_large"
 	// passthrough is the one outcome not tied to an API route.
 	outcomePassthrough = "passthrough"
 	routeNone          = "-"
@@ -31,6 +35,7 @@ var requestOutcomes = []string{
 	outcomeAuthzError,
 	outcomeClientGone,
 	outcomeUpstreamError,
+	outcomeResponseTooLarge,
 }
 
 // Metrics are served on their own listener, never on the proxy port. The proxy

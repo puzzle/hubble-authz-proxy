@@ -184,6 +184,16 @@ proxy:
   requireBothEndpoints: false
   # -- How long per-channel service-map state is kept after a client goes idle.
   channelTTL: 10m
+  # -- Largest backend response the proxy will buffer in order to filter it.
+  #
+  # The whole body is held in memory while it is decoded, filtered and
+  # re-encoded, so peak usage is roughly this times the number of callers
+  # polling at once — keep it well under resources.limits.memory. Service-map
+  # responses are the large ones and grow with cluster size; a few hundred KB is
+  # typical. Oversized responses are refused with 502, never forwarded
+  # unfiltered, and are counted as outcome="response_too_large".
+  maxResponseBytes: 8388608  # 8 MiB
+
   # -- debug | info | warn | error
   #
   # debug logs the identity and resolved scope of every request, which is the

@@ -9,6 +9,9 @@ import (
 	"testing"
 )
 
+// testMaxResponse is generous: tests that care about the limit set their own.
+const testMaxResponse = 8 << 20
+
 // testLogger discards output; tests assert on behaviour, not log text.
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug}))
