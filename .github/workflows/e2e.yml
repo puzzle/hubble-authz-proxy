@@ -33,7 +33,7 @@ jobs:
                   cache: true
 
             - name: Pre-pull backend image
-              run: docker pull quay.io/cilium/hubble-ui-backend:v0.13.3
+              run: docker pull quay.io/cilium/hubble-ui-backend:v0.13.5
 
             - name: Run e2e suite
               run: go test -tags e2e -count=1 -run TestE2E -v ./...

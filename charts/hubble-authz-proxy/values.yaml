@@ -33,7 +33,7 @@ hubbleUI:
   frontend:
     image:
       repository: quay.io/cilium/hubble-ui
-      tag: v0.13.3
+      tag: v0.13.5
       pullPolicy: IfNotPresent
     port: 8081
     resources:
@@ -46,7 +46,7 @@ hubbleUI:
   backend:
     image:
       repository: quay.io/cilium/hubble-ui-backend
-      tag: v0.13.3
+      tag: v0.13.5
       pullPolicy: IfNotPresent
     # Moved off 8090 so the proxy can take the port the frontend already calls,
     # which keeps the nginx config identical to Cilium's.
