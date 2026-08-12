@@ -44,7 +44,7 @@ import (
 
 // Matches the hubble-ui-backend shipped by Cilium v1.19.1. Keep in step with the
 // go.mod pin: the point of these tests is to catch that pairing drifting.
-const backendImage = "quay.io/cilium/hubble-ui-backend:v0.13.3"
+const backendImage = "quay.io/cilium/hubble-ui-backend:v0.13.5"
 
 // The backend picks its scenario from a preset name, and tenant-jobs is the one
 // that reads flows from log files. The namespace list it reports is hardcoded in
