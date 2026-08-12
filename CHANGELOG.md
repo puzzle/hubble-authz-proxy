@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.1](https://github.com/splattner/hubble-authz-proxy/compare/v0.5.0...v0.5.1) (2026-08-12)
+
+
+### Bug Fixes
+
+* export client_gone and upstream_error at zero ([#9](https://github.com/splattner/hubble-authz-proxy/issues/9)) ([73b0eb8](https://github.com/splattner/hubble-authz-proxy/commit/73b0eb8d572630fe58aade8e5a9efe1b244b3aba))
+
 ## [0.5.0](https://github.com/splattner/hubble-authz-proxy/compare/v0.4.0...v0.5.0) (2026-08-12)
 
 
