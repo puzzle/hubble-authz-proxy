@@ -87,6 +87,64 @@ hubbleUI:
             pathType: Prefix
     tls: []
 
+  # -- Run oauth2-proxy as a fourth container instead of authenticating at the
+  # ingress. The pod then terminates auth itself:
+  #
+  #   ingress -> oauth2-proxy :4180 -> frontend :8081 -> proxy -> backend
+  #
+  # Use this when you do not already run an ingress-level authenticator, or want
+  # Hubble UI's auth self-contained rather than depending on middleware
+  # annotations that live somewhere else.
+  #
+  # NOTE: as the reverse proxy, oauth2-proxy emits X-Forwarded-User/-Email/
+  # -Groups, not X-Auth-Request-*. The chart sets the proxy's
+  # --identity-header-prefix accordingly; do not change one without the other or
+  # every request arrives anonymous and is refused.
+  oauth2Proxy:
+    enabled: false
+
+    image:
+      repository: quay.io/oauth2-proxy/oauth2-proxy
+      tag: v7.15.3
+      pullPolicy: IfNotPresent
+
+    port: 4180
+
+    # Secrets. Prefer existingSecret; inline values end up in your values file
+    # and in the release history.
+    #
+    # existingSecret must provide: client-id, client-secret, cookie-secret
+    existingSecret: ""
+    clientID: ""
+    clientSecret: ""
+    # openssl rand -base64 32 | tr -- '+/' '-_'
+    cookieSecret: ""
+
+    # -- Flags, as a map of name to value (no leading --). These defaults are
+    # the ones a working setup needs; extend rather than replace.
+    extraArgs:
+      provider: oidc
+      # oidc-issuer-url: https://login.example.com/realms/main
+      scope: "openid email profile groups"
+      # Without this oauth2-proxy rejects every login: the default allows no
+      # email domain at all.
+      email-domain: "*"
+      # Trust the ingress's X-Forwarded-* when building redirect URLs.
+      reverse-proxy: "true"
+      # Emit the identity to the upstream, which is the frontend in this pod.
+      pass-user-headers: "true"
+      # Do not hand the upstream the raw token; the proxy only needs identity.
+      pass-authorization-header: "false"
+      set-authorization-header: "false"
+      skip-provider-button: "true"
+
+    resources:
+      requests:
+        cpu: 25m
+        memory: 64Mi
+      limits:
+        memory: 128Mi
+
   # The backend watches namespaces and reads pods/services through the API
   # server. Containers share the pod's ServiceAccount, so when authz.mode=rbac
   # these rules are merged with the SubjectAccessReview permissions.

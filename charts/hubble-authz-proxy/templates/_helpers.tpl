@@ -93,3 +93,12 @@ address (":8090"), but nginx and containerPort need the number alone.
 {{- if not $port }}{{ fail (printf "cannot derive a port from proxy.listen=%q" .Values.proxy.listen) }}{{ end -}}
 {{- $port }}
 {{- end }}
+
+{{/*
+Secret holding oauth2-proxy's credentials. An existingSecret is preferred;
+otherwise the chart renders one from values, which means the values land in the
+release history too.
+*/}}
+{{- define "hubble-authz-proxy.oauth2SecretName" -}}
+{{- default (printf "%s-oauth2-proxy" (include "hubble-authz-proxy.uiFullname" .)) .Values.hubbleUI.oauth2Proxy.existingSecret }}
+{{- end }}

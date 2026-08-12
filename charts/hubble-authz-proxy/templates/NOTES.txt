@@ -7,7 +7,16 @@ Cross-namespace:  {{ if .Values.proxy.requireBothEndpoints }}strict (both endpoi
 
 Mode: STANDALONE — this chart owns Hubble UI.
 
+{{- if .Values.hubbleUI.oauth2Proxy.enabled }}
+    oauth2-proxy :{{ .Values.hubbleUI.oauth2Proxy.port }} --> frontend :{{ .Values.hubbleUI.frontend.port }} --/api--> proxy :{{ include "hubble-authz-proxy.listenPort" . }} --> backend :{{ .Values.hubbleUI.backend.port }} --> {{ .Values.hubbleUI.relay.address }}
+
+    Auth is terminated in the pod. oauth2-proxy is the reverse proxy here, so it
+    emits X-Forwarded-* rather than X-Auth-Request-*, and the proxy has been
+    configured to read that family. Do not put another authenticator in front
+    expecting X-Auth-Request-* to be honoured.
+{{- else }}
     frontend :{{ .Values.hubbleUI.frontend.port }} --/api--> proxy :{{ include "hubble-authz-proxy.listenPort" . }} --> backend :{{ .Values.hubbleUI.backend.port }} --> {{ .Values.hubbleUI.relay.address }}
+{{- end }}
 
 Reach it at:
 
@@ -20,8 +29,13 @@ Remaining steps:
 
        hubble.ui.enabled=false
 
+{{- if .Values.hubbleUI.oauth2Proxy.enabled }}
+2. Nothing else — oauth2-proxy in this pod handles login. Make sure your IdP
+   allows the redirect URL for {{ if .Values.hubbleUI.ingress.enabled }}{{ (first .Values.hubbleUI.ingress.hosts).host }}{{ else }}your host{{ end }}/oauth2/callback.
+{{- else }}
 2. Point authentication at {{ if .Values.hubbleUI.ingress.enabled }}the Ingress this chart created{{ else }}the Service above (set hubbleUI.ingress.enabled to have the chart render the Ingress){{ end }},
    and make sure it sets X-Auth-Request-User / -Email / -Groups.
+{{- end }}
 
 {{- else }}
 

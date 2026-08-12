@@ -33,7 +33,7 @@ spec:
       ports:
         - protocol: TCP
           {{- if $ui }}
-          port: {{ .Values.hubbleUI.frontend.port }}
+          port: {{ if .Values.hubbleUI.oauth2Proxy.enabled }}{{ .Values.hubbleUI.oauth2Proxy.port }}{{ else }}{{ .Values.hubbleUI.frontend.port }}{{ end }}
           {{- else }}
           port: {{ .Values.service.port }}
           {{- end }}

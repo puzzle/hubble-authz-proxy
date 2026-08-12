@@ -121,6 +121,15 @@ jobs:
                     --set 'networkPolicy.ingressFrom[0].namespaceSelector.matchLabels.kubernetes\.io/metadata\.name=traefik' \
                     > /tmp/render-standalone.yaml
 
+            - name: Render chart (standalone + oauth2-proxy sidecar)
+              run: |
+                  helm template hap ./charts/hubble-authz-proxy \
+                    --set hubbleUI.enabled=true \
+                    --set hubbleUI.oauth2Proxy.enabled=true \
+                    --set hubbleUI.oauth2Proxy.existingSecret=oauth2-proxy \
+                    > /tmp/render-standalone-oauth2.yaml
+                  grep -q 'identity-header-prefix=X-Forwarded' /tmp/render-standalone-oauth2.yaml
+
             - name: Render chart (standalone + relay TLS)
               run: |
                   helm template hap ./charts/hubble-authz-proxy \

@@ -12,8 +12,10 @@ metadata:
 spec:
   type: {{ .Values.hubbleUI.service.type }}
   ports:
+    {{- /* With the oauth2-proxy sidecar it must be the entry point, or traffic
+           would reach the frontend having skipped authentication entirely. */}}
     - port: {{ .Values.hubbleUI.service.port }}
-      targetPort: http
+      targetPort: {{ if .Values.hubbleUI.oauth2Proxy.enabled }}oauth2{{ else }}http{{ end }}
       protocol: TCP
       name: http
     {{- if .Values.metrics.enabled }}

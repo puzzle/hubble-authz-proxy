@@ -33,6 +33,7 @@ type Proxy struct {
 	services    *serviceRegistry
 	requireBoth bool
 	apiPrefix   string
+	headers     identityHeaders
 }
 
 type ctxKey int
@@ -51,12 +52,13 @@ type reqInfo struct {
 	scope    Scope
 }
 
-func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefix string, requireBoth bool) *Proxy {
+func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefix string, requireBoth bool, identityPrefix string) *Proxy {
 	p := &Proxy{
 		authz:       authz,
 		services:    reg,
 		requireBoth: requireBoth,
 		apiPrefix:   apiPrefix,
+		headers:     newIdentityHeaders(identityPrefix),
 	}
 	p.rp = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -94,7 +96,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	timer := prometheus.NewTimer(requestDuration.WithLabelValues(route))
 	defer timer.ObserveDuration()
 
-	id, err := identityFromRequest(r)
+	id, err := p.headers.from(r)
 	if err != nil {
 		requestsTotal.WithLabelValues(route, "unauthenticated").Inc()
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
