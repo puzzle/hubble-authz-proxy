@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/splattner/hubble-authz-proxy/compare/v0.4.0...v0.5.0) (2026-08-12)
+
+
+### Features
+
+* structured logging with request-level diagnostics ([#7](https://github.com/splattner/hubble-authz-proxy/issues/7)) ([b8268d4](https://github.com/splattner/hubble-authz-proxy/commit/b8268d40c8ed3f3dac647a1fd95672b6777ec1f8))
+
 ## [0.4.0](https://github.com/splattner/hubble-authz-proxy/compare/v0.3.0...v0.4.0) (2026-08-12)
 
 
