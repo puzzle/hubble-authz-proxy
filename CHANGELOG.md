@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.4.0](https://github.com/splattner/hubble-authz-proxy/compare/v0.3.0...v0.4.0) (2026-08-12)
+
+
+### Features
+
+* **chart:** optionally run oauth2-proxy as a sidecar ([#5](https://github.com/splattner/hubble-authz-proxy/issues/5)) ([17777da](https://github.com/splattner/hubble-authz-proxy/commit/17777da0e7b0aa38c039715a383e2921cb7c9635))
+
 ## [0.3.0](https://github.com/splattner/hubble-authz-proxy/compare/v0.2.0...v0.3.0) (2026-08-11)
 
 
