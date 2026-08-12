@@ -83,13 +83,13 @@ func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefi
 				// The caller left; there is nobody to send a status to. Counted
 				// rather than dropped: the rate matters even though any single
 				// occurrence is unremarkable. See clientGone.
-				requestsTotal.WithLabelValues(route, "client_gone").Inc()
+				requestsTotal.WithLabelValues(route, outcomeClientGone).Inc()
 				p.log.Debug("client disconnected before the response completed",
 					"route", route, "path", r.URL.Path, "err", err)
 				return
 			}
 
-			requestsTotal.WithLabelValues(route, "upstream_error").Inc()
+			requestsTotal.WithLabelValues(route, outcomeUpstreamError).Inc()
 			p.log.Error("refusing to serve response",
 				"route", route, "path", r.URL.Path, "err", err)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
@@ -102,7 +102,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Health checks and static assets are not namespace-bearing, and must not
 	// require an identity.
 	if !strings.HasPrefix(r.URL.Path, p.apiPrefix) {
-		requestsTotal.WithLabelValues("-", "passthrough").Inc()
+		requestsTotal.WithLabelValues(routeNone, outcomePassthrough).Inc()
 		ctx := context.WithValue(r.Context(), reqInfoCtxKey, reqInfo{filtered: false})
 		p.rp.ServeHTTP(w, r.WithContext(ctx))
 		return
@@ -117,7 +117,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	id, err := p.headers.from(r)
 	if err != nil {
-		requestsTotal.WithLabelValues(route, "unauthenticated").Inc()
+		requestsTotal.WithLabelValues(route, outcomeUnauthenticated).Inc()
 		// Name the headers rather than the values, and say explicitly when the
 		// other family is present: a prefix mismatch otherwise looks exactly
 		// like an authenticator that is not running at all.
@@ -132,7 +132,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	scope, err := p.authz.AllowedNamespaces(r.Context(), id)
 	if err != nil {
-		requestsTotal.WithLabelValues(route, "authz_error").Inc()
+		requestsTotal.WithLabelValues(route, outcomeAuthzError).Inc()
 		if clientGone(err) {
 			p.log.Debug("caller left while their scope was being resolved",
 				"route", route, "user", id.Email)
@@ -153,7 +153,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"unrestricted", scope.All,
 		"namespaces", len(scope.Namespaces))
 
-	requestsTotal.WithLabelValues(route, "filtered").Inc()
+	requestsTotal.WithLabelValues(route, outcomeFiltered).Inc()
 	ctx := context.WithValue(r.Context(), reqInfoCtxKey, reqInfo{filtered: true, scope: scope})
 	p.rp.ServeHTTP(w, r.WithContext(ctx))
 }

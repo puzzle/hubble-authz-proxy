@@ -91,3 +91,55 @@ func TestMetricsHandler(t *testing.T) {
 		}
 	})
 }
+
+// Every outcome the proxy can report must be exported at zero on startup.
+//
+// A *Vec emits nothing until a label combination is first observed, so an
+// outcome that is only created on first occurrence cannot be alerted on: a
+// rate() over it returns no data rather than 0, and the series appears at the
+// exact moment you would have wanted the alert to already exist. client_gone
+// and upstream_error shipped that way, which is what this guards.
+func TestEveryOutcomeIsPreInitialised(t *testing.T) {
+	reg := metricsRegistry()
+	families, err := reg.Gather()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	seen := map[string]map[string]bool{}
+	for _, f := range families {
+		if f.GetName() != "hubble_authz_requests_total" {
+			continue
+		}
+		for _, m := range f.GetMetric() {
+			var route, outcome string
+			for _, l := range m.GetLabel() {
+				switch l.GetName() {
+				case "route":
+					route = l.GetValue()
+				case "outcome":
+					outcome = l.GetValue()
+				}
+			}
+			if seen[route] == nil {
+				seen[route] = map[string]bool{}
+			}
+			seen[route][outcome] = true
+		}
+	}
+	if len(seen) == 0 {
+		t.Fatal("hubble_authz_requests_total was not exported at all")
+	}
+
+	for _, route := range knownRoutes {
+		for _, outcome := range requestOutcomes {
+			if !seen[route][outcome] {
+				t.Errorf("route=%q outcome=%q is never exported; an alert on it "+
+					"would return no data until the first occurrence", route, outcome)
+			}
+		}
+	}
+	if !seen[routeNone][outcomePassthrough] {
+		t.Errorf("route=%q outcome=%q is never exported", routeNone, outcomePassthrough)
+	}
+}
