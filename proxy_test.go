@@ -51,7 +51,7 @@ func newStack(t *testing.T, authz Authorizer, requireBoth bool, msg *cppb.Messag
 	if err != nil {
 		t.Fatal(err)
 	}
-	front := httptest.NewServer(NewProxy(u, authz, newServiceRegistry(time.Minute), "/api", requireBoth, AuthRequestPrefix, testLogger()))
+	front := httptest.NewServer(NewProxy(u, authz, newServiceRegistry(time.Minute), "/api", requireBoth, AuthRequestPrefix, testMaxResponse, testLogger()))
 	t.Cleanup(front.Close)
 	return front
 }
@@ -265,7 +265,7 @@ func TestNonAPIPathsPassThrough(t *testing.T) {
 	u, _ := url.Parse(backend.URL)
 
 	front := httptest.NewServer(NewProxy(u, fakeAuthorizer{scope: scopeOf("payments")},
-		newServiceRegistry(time.Minute), "/api", false, AuthRequestPrefix, testLogger()))
+		newServiceRegistry(time.Minute), "/api", false, AuthRequestPrefix, testMaxResponse, testLogger()))
 	t.Cleanup(front.Close)
 
 	resp := post(t, front, "/healthz", nil)
@@ -293,5 +293,79 @@ func TestJSONEnvelopeUsesStructTags(t *testing.T) {
 	}
 	if _, ok := meta["route_name"]; !ok {
 		t.Errorf("meta keys = %v, want snake_case route_name", meta)
+	}
+}
+
+// newStackLimited is newStack with a response-size cap, and a backend that
+// answers with a body of the requested size.
+func newStackLimited(t *testing.T, maxResponse int64, bodyBytes int) *httptest.Server {
+	t.Helper()
+
+	// A real envelope, padded to the target size so it is valid but oversized:
+	// the point is that the limit trips before any of it is served, not that a
+	// malformed body is rejected.
+	ns := threeNamespaces()
+	pad := make([]byte, bodyBytes)
+	for i := range pad {
+		pad[i] = 'a'
+	}
+	ns.GetNamespaces().Namespaces = append(ns.GetNamespaces().GetNamespaces(),
+		&uipb.NamespaceState{Namespace: &uipb.NamespaceDescriptor{Name: "payments-" + string(pad)}})
+	msg := envelopeWith(routeControlStream, ns)
+
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		body, err := encodeEnvelope(msg, true)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(body)
+	}))
+	t.Cleanup(backend.Close)
+
+	u, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	front := httptest.NewServer(NewProxy(u, fakeAuthorizer{scope: scopeOf("payments")},
+		newServiceRegistry(time.Minute), "/api", false, AuthRequestPrefix, maxResponse, testLogger()))
+	t.Cleanup(front.Close)
+	return front
+}
+
+// An oversized response must be refused outright. Filtering a truncated body
+// would be worse than useless: the decode would fail, or worse, succeed on a
+// prefix and produce a partially-filtered result.
+func TestResponseOverLimitIsRefused(t *testing.T) {
+	srv := newStackLimited(t, 1024, 64*1024)
+
+	resp := post(t, srv, "/api/control-stream", map[string]string{
+		"X-Auth-Request-Email": "bob@example.com",
+	})
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status %d, want 502", resp.StatusCode)
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	// Nothing of the backend's payload may reach the caller, filtered or not.
+	if bytes.Contains(raw, []byte("kube-system")) || bytes.Contains(raw, []byte("aaaa")) {
+		t.Error("part of the oversized response leaked to the caller")
+	}
+}
+
+// The limit must not disturb normal traffic, including a body sitting exactly
+// at the boundary — the read goes one byte past it precisely so that "equal to
+// the limit" is not mistaken for "truncated".
+func TestResponseUnderLimitIsServed(t *testing.T) {
+	srv := newStackLimited(t, 1<<20, 16)
+
+	resp := post(t, srv, "/api/control-stream", map[string]string{
+		"X-Auth-Request-Email": "bob@example.com",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d, want 200", resp.StatusCode)
+	}
+	if names := decodeNamespaces(t, resp, true); len(names) != 1 || names[0] != "payments" {
+		t.Errorf("got %v, want the filtered [payments]", names)
 	}
 }

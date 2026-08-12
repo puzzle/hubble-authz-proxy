@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -35,6 +36,7 @@ type Proxy struct {
 	apiPrefix   string
 	headers     identityHeaders
 	log         *slog.Logger
+	maxResponse int64
 }
 
 type ctxKey int
@@ -53,7 +55,11 @@ type reqInfo struct {
 	scope    Scope
 }
 
-func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefix string, requireBoth bool, identityPrefix string, logger *slog.Logger) *Proxy {
+// errResponseTooLarge is a limit being hit, not an upstream fault, and is
+// classified separately so the two can be told apart in metrics.
+var errResponseTooLarge = errors.New("backend response exceeds --max-response-bytes")
+
+func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefix string, requireBoth bool, identityPrefix string, maxResponse int64, logger *slog.Logger) *Proxy {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -64,6 +70,7 @@ func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefi
 		apiPrefix:   apiPrefix,
 		headers:     newIdentityHeaders(identityPrefix),
 		log:         logger,
+		maxResponse: maxResponse,
 	}
 	p.rp = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -89,6 +96,14 @@ func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefi
 				return
 			}
 
+			if errors.Is(err, errResponseTooLarge) {
+				requestsTotal.WithLabelValues(route, outcomeResponseTooLarge).Inc()
+				p.log.Error("backend response too large to filter; refusing to serve it",
+					"route", route, "limit_bytes", p.maxResponse,
+					"hint", "raise --max-response-bytes if this is legitimate")
+				http.Error(w, "response too large", http.StatusBadGateway)
+				return
+			}
 			requestsTotal.WithLabelValues(route, outcomeUpstreamError).Inc()
 			p.log.Error("refusing to serve response",
 				"route", route, "path", r.URL.Path, "err", err)
@@ -185,11 +200,25 @@ func (p *Proxy) filterResponse(resp *http.Response) error {
 		return errors.New("unexpected content-type from backend: " + contentType)
 	}
 
-	raw, err := io.ReadAll(resp.Body)
+	// Bounded: the whole body is held in memory to be decoded, filtered and
+	// re-encoded, so an unbounded read makes peak memory a function of what the
+	// backend chooses to send times the number of callers polling at once.
+	// Service-map responses are the large ones — hundreds of kilobytes on a
+	// cluster of any size — and the pod has a memory limit, so the failure mode
+	// without this is an OOMKill that takes the UI down for everyone.
+	//
+	// Reading one byte past the limit is what distinguishes "exactly at the
+	// limit" from "truncated", so an oversized response is refused rather than
+	// filtered from a partial body.
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, p.maxResponse+1))
 	if err != nil {
 		return err
 	}
 	_ = resp.Body.Close()
+	if int64(len(raw)) > p.maxResponse {
+		return fmt.Errorf("%w: read more than %d bytes on route %q",
+			errResponseTooLarge, p.maxResponse, resp.Request.URL.Path)
+	}
 
 	msg, err := decodeEnvelope(raw, isJSON)
 	if err != nil {

@@ -363,6 +363,7 @@ never a match on its own.
 | `--channel-ttl` | `10m` | How long per-channel service-map state survives an idle client |
 | `--require-both-endpoints` | `false` | Strict cross-namespace policy |
 | `--metrics-listen` | `:9090` | Serves `/metrics` and `/healthz`; empty disables it |
+| `--max-response-bytes` | `8388608` | Largest response the proxy will buffer to filter; oversized ones are refused |
 | `--log-level` | `info` | `debug` logs the identity and resolved scope of every request |
 | `--log-format` | `text` | `text` or `json` |
 | `--shutdown-timeout` | `20s` | Grace period for in-flight requests after SIGTERM |
@@ -408,6 +409,24 @@ sum(rate(hubble_authz_subjectaccessreviews_total[5m]))
 ```
 
 Set `metrics.serviceMonitor.enabled=true` if you run prometheus-operator.
+
+### Response size
+
+Filtering requires the whole body in memory — it is decoded, filtered and
+re-encoded — so peak usage is roughly `--max-response-bytes` times the number of
+callers polling at once. Keep it well under the pod's memory limit.
+
+Service-map responses are the large ones and grow with cluster size; a few
+hundred KB is ordinary. A response over the limit is **refused with 502, never
+forwarded unfiltered or truncated**, and counted as:
+
+```promql
+sum(rate(hubble_authz_requests_total{outcome="response_too_large"}[5m]))
+```
+
+Any hit there means the limit needs raising, or the cluster has outgrown what
+one response can carry — it is a configured bound, not a fault, which is why it
+is a separate outcome from `upstream_error`.
 
 ### Diagnosing "this user sees nothing"
 
