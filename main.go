@@ -40,6 +40,8 @@ func main() {
 		metricsListen = flag.String("metrics-listen", ":9090", "address serving /metrics and /healthz; empty disables it")
 		backendURL    = flag.String("backend", "http://hubble-ui-backend:8090", "upstream hubble-ui backend base URL")
 		apiPrefix     = flag.String("api-prefix", "/api", "path prefix carrying backend routes; everything else is passed through")
+		identityPfx   = flag.String("identity-header-prefix", AuthRequestPrefix,
+			"header family carrying the caller identity: X-Auth-Request (nginx auth_request / Traefik forwardAuth) or X-Forwarded (oauth2-proxy as the reverse proxy)")
 		mode          = flag.String("authz", "static", "authorization backend: static | rbac")
 		mapFile       = flag.String("authz-config", "/etc/hubble-authz/mapping.yaml", "static mode: group/user -> namespace mapping")
 		rbacTTL       = flag.Duration("rbac-ttl", 60*time.Second, "rbac mode: cache TTL for a caller's resolved namespace set")
@@ -87,7 +89,7 @@ func main() {
 	reg := newServiceRegistry(*channelTTL)
 	go reg.RunSweeper(ctx)
 
-	proxy := NewProxy(backend, authz, reg, *apiPrefix, *reqBoth)
+	proxy := NewProxy(backend, authz, reg, *apiPrefix, *reqBoth, *identityPfx)
 
 	srv := &http.Server{
 		Addr:              *listen,
@@ -109,8 +111,8 @@ func main() {
 		}()
 	}
 
-	log.Printf("hubble-authz-proxy %s: listen=%s metrics=%s backend=%s authz=%s requireBoth=%v",
-		version, *listen, *metricsListen, backend, *mode, *reqBoth)
+	log.Printf("hubble-authz-proxy %s: listen=%s metrics=%s backend=%s authz=%s requireBoth=%v identityHeaders=%s-*",
+		version, *listen, *metricsListen, backend, *mode, *reqBoth, *identityPfx)
 
 	serveErr := make(chan error, 1)
 	go func() { serveErr <- srv.ListenAndServe() }()

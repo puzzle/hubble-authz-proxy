@@ -200,7 +200,7 @@ func startProxy(t *testing.T, backendURL string, authz Authorizer, requireBoth b
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(NewProxy(u, authz, newServiceRegistry(time.Minute), "/api", requireBoth))
+	srv := httptest.NewServer(NewProxy(u, authz, newServiceRegistry(time.Minute), "/api", requireBoth, AuthRequestPrefix))
 	t.Cleanup(srv.Close)
 	return srv
 }

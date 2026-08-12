@@ -85,6 +85,9 @@ spec:
             - --listen={{ .Values.proxy.listen }}
             - --backend=http://127.0.0.1:{{ .Values.hubbleUI.backend.port }}
             - --api-prefix={{ .Values.proxy.apiPrefix }}
+            {{- /* oauth2-proxy as the reverse proxy emits X-Forwarded-*; an
+                   ingress-level authenticator copies X-Auth-Request-*. */}}
+            - --identity-header-prefix={{ if .Values.hubbleUI.oauth2Proxy.enabled }}X-Forwarded{{ else }}X-Auth-Request{{ end }}
             - --authz={{ .Values.authz.mode }}
             - --require-both-endpoints={{ .Values.proxy.requireBothEndpoints }}
             - --channel-ttl={{ .Values.proxy.channelTTL }}
@@ -131,6 +134,56 @@ spec:
               mountPath: /etc/hubble-authz
               readOnly: true
           {{- end }}
+
+        {{- if .Values.hubbleUI.oauth2Proxy.enabled }}
+        - name: oauth2-proxy
+          image: "{{ .Values.hubbleUI.oauth2Proxy.image.repository }}:{{ .Values.hubbleUI.oauth2Proxy.image.tag }}"
+          imagePullPolicy: {{ .Values.hubbleUI.oauth2Proxy.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          args:
+            - --http-address=0.0.0.0:{{ .Values.hubbleUI.oauth2Proxy.port }}
+            {{- /* The only upstream is the frontend beside it. Everything the
+                   browser sees passes through here first. */}}
+            - --upstream=http://127.0.0.1:{{ .Values.hubbleUI.frontend.port }}
+            {{- range $k, $v := .Values.hubbleUI.oauth2Proxy.extraArgs }}
+            - --{{ $k }}={{ $v }}
+            {{- end }}
+          env:
+            - name: OAUTH2_PROXY_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "hubble-authz-proxy.oauth2SecretName" . }}
+                  key: client-id
+            - name: OAUTH2_PROXY_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "hubble-authz-proxy.oauth2SecretName" . }}
+                  key: client-secret
+            - name: OAUTH2_PROXY_COOKIE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "hubble-authz-proxy.oauth2SecretName" . }}
+                  key: cookie-secret
+          ports:
+            - name: oauth2
+              containerPort: {{ .Values.hubbleUI.oauth2Proxy.port }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /ping
+              port: oauth2
+            initialDelaySeconds: 5
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /ping
+              port: oauth2
+            initialDelaySeconds: 2
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.hubbleUI.oauth2Proxy.resources | nindent 12 }}
+        {{- end }}
 
         - name: backend
           image: "{{ .Values.hubbleUI.backend.image.repository }}:{{ .Values.hubbleUI.backend.image.tag }}"

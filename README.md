@@ -129,6 +129,22 @@ frontend :8081 ──/api──► authz-proxy :8090 ──► ui-backend :8091 
 
 Set `hubble.ui.enabled=false` in Cilium. Nothing else to wire.
 
+Optionally add oauth2-proxy as a fourth container
+(`hubbleUI.oauth2Proxy.enabled=true`) so the pod authenticates itself, with no
+ingress middleware involved:
+
+```text
+ingress ──► oauth2-proxy :4180 ──► frontend :8081 ──/api──► authz-proxy ──► ui-backend ──► relay
+            └────────────────────────── one pod ──────────────────────────┘
+```
+
+> **The header family changes with it.** As the reverse proxy, oauth2-proxy emits
+> `X-Forwarded-User/-Email/-Groups`, *not* `X-Auth-Request-*` — that family only
+> appears with `--set-xauthrequest`, which sets **response** headers for an
+> `auth_request` subrequest. The chart sets the proxy's
+> `--identity-header-prefix` to match, so the two cannot drift; if you wire this
+> by hand and get it wrong, every request arrives anonymous and is refused.
+
 **Proxy-only (default).** Cilium keeps its Hubble UI and you repoint its `/api`
 at this proxy, as described below.
 
