@@ -23,7 +23,11 @@ spec:
   template:
     metadata:
       annotations:
-        {{- if and .Values.authz.checksumAnnotation (eq .Values.authz.mode "static") (not .Values.authz.existingConfigMap) }}
+        {{- if and .Values.authz.checksumAnnotation (eq .Values.authz.mode "static") (not .Values.authz.existingConfigMap) (eq (toString .Values.authz.reloadInterval) "0") }}
+        {{/* Only when hot-reload is off. With --authz-config-reload the proxy
+             re-reads the file itself, so rolling every pod on a mapping edit is
+             pure disruption: it kills the long-poll requests the UI holds open,
+             which surfaces as errors in the browser. */}}
         checksum/mapping: {{ include (print $.Template.BasePath "/configmap-mapping.yaml") . | sha256sum }}
         {{- end }}
         checksum/nginx: {{ include (print $.Template.BasePath "/hubble-ui-configmap.yaml") . | sha256sum }}
@@ -102,6 +106,7 @@ spec:
             - --metrics-listen={{ if .Values.metrics.enabled }}:{{ .Values.metrics.port }}{{ end }}
             {{- if eq .Values.authz.mode "static" }}
             - --authz-config=/etc/hubble-authz/mapping.yaml
+            - --authz-config-reload={{ .Values.authz.reloadInterval }}
             {{- else }}
             - --rbac-ttl={{ .Values.authz.cacheTTL }}
             - --rbac-concurrency={{ .Values.authz.concurrency }}

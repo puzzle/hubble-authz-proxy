@@ -304,8 +304,40 @@ userToNamespaces:
   bob@example.com: [sandbox-bob]
 ```
 
-The proxy reads this once at startup. `authz.checksumAnnotation` (on by default)
-rolls the Deployment when the ConfigMap changes.
+The file is **re-read every `authz.reloadInterval`** (30s), so granting or
+revoking access takes effect without restarting anything. kubelet updates a
+mounted ConfigMap in place, so without this an edit *appears* to work — the
+ConfigMap changes, the file inside the pod changes — and does nothing until the
+pod restarts. Revocations are delayed the same way, which is the direction that
+matters. kubelet's own sync period (~1 min by default) is the real floor on how
+fast an edit can arrive; polling faster does not help.
+
+A failed read or an unparseable file **keeps the previous mapping**. A
+half-written file must not become a cluster-wide lockout, and the file is being
+written by something else while we read it, so a torn read is ordinary rather
+than exceptional. The trade is that a bad edit leaves the old rules in force —
+including a revocation that has not applied — so the failure is made loud:
+
+```promql
+# Reloads failing, or the reloader itself stopped. Either way the mapping in
+# force is not the one in the ConfigMap.
+time() - hubble_authz_mapping_last_reload_timestamp_seconds > 300
+
+# What went wrong.
+sum(rate(hubble_authz_mapping_reloads_total{result="error"}[5m])) > 0
+```
+
+Alert on the **timestamp**, not just the error counter: a reloader goroutine
+that died stops incrementing every series, which a `rate()` cannot see.
+
+`authz.checksumAnnotation` still rolls the Deployment on a mapping change, but
+is applied **only when `reloadInterval: 0`** — with hot-reload on, restarting
+every pod is pure disruption, since it kills the long-poll requests the UI holds
+open. It also never covered `authz.existingConfigMap`, which is what GitOps and
+secret tooling use; hot-reload does.
+
+A bad mapping at **startup** is still fatal. Coming up with no mapping would
+silently deny everyone, which looks like an outage with no cause.
 
 **`rbac`** — asks the API server, per namespace, whether the caller may `list
 pods` there, via `SubjectAccessReview`. Tracks real `kubectl` access with no
@@ -360,6 +392,7 @@ never a match on its own.
 | `--api-prefix` | `/api` | Paths under this are filtered and require identity; everything else passes through |
 | `--authz` | `static` | `static` or `rbac` |
 | `--authz-config` | `/etc/hubble-authz/mapping.yaml` | Static mapping file |
+| `--authz-config-reload` | `30s` | How often the mapping file is re-read; `0` disables and makes changes need a restart |
 | `--rbac-ttl` | `60s` | Cache TTL for a resolved namespace set |
 | `--channel-ttl` | `10m` | How long per-channel service-map state survives an idle client |
 | `--max-channels` | `1024` | Cap on channels holding service-map state; past it the least recently used is dropped. `0` disables |
@@ -393,6 +426,8 @@ rule, `networkPolicy.metricsIngressFrom`; leaving it empty blocks Prometheus.
 | `hubble_authz_tracked_channels` | gauge | — |
 | `hubble_authz_channel_evictions_total` | counter | — |
 | `hubble_authz_empty_scope_notifications_total` | counter | — |
+| `hubble_authz_mapping_reloads_total` | counter | `result` |
+| `hubble_authz_mapping_last_reload_timestamp_seconds` | gauge | — |
 | `hubble_authz_build_info` | gauge | `version` |
 
 All label values come from fixed sets, never from request contents, so a caller

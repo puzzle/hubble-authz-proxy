@@ -28,6 +28,17 @@ const (
 	routeNone          = "-"
 )
 
+// Mapping reload results. Same discipline as the outcomes above: declared once
+// and shared by the call sites and the pre-initialisation, so a result can never
+// exist without being exported at zero.
+const (
+	reloadChanged   = "changed"
+	reloadUnchanged = "unchanged"
+	reloadError     = "error"
+)
+
+var mappingReloadResults = []string{reloadChanged, reloadUnchanged, reloadError}
+
 // requestOutcomes is every outcome reported against a route.
 var requestOutcomes = []string{
 	outcomeFiltered,
@@ -103,6 +114,21 @@ var (
 			"A rising rate means users are reaching Hubble with no access mapped to them.",
 	})
 
+	mappingReloads = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "hubble_authz_mapping_reloads_total",
+		Help: "Static mapping reload attempts, by result. " +
+			"result=error means the previous mapping is still in force.",
+	}, []string{"result"})
+
+	// Paired with the counter on purpose: a reloader goroutine that died stops
+	// incrementing every series, which is invisible in a rate(). A timestamp
+	// going stale is not.
+	mappingLastReload = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hubble_authz_mapping_last_reload_timestamp_seconds",
+		Help: "When the static mapping was last read successfully. " +
+			"Alert on this going stale: it covers a failing reload AND a reloader that stopped.",
+	})
+
 	buildInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hubble_authz_build_info",
 		Help: "Always 1. Carries the running version as a label.",
@@ -125,6 +151,8 @@ func metricsRegistry() *prometheus.Registry {
 		trackedChannels,
 		channelEvictionsTotal,
 		emptyScopeNotifications,
+		mappingReloads,
+		mappingLastReload,
 		buildInfo,
 	)
 	initLabelCombinations()
@@ -164,6 +192,10 @@ func initLabelCombinations() {
 	}
 	for _, mode := range []string{"static", "rbac"} {
 		scopeResolutionDuration.WithLabelValues(mode)
+	}
+
+	for _, result := range mappingReloadResults {
+		mappingReloads.WithLabelValues(result)
 	}
 }
 
