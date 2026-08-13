@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.0](https://github.com/splattner/hubble-authz-proxy/compare/v0.5.1...v0.6.0) (2026-08-13)
+
+
+### Features
+
+* re-read the static mapping without a restart ([#22](https://github.com/splattner/hubble-authz-proxy/issues/22)) ([d45ec44](https://github.com/splattner/hubble-authz-proxy/commit/d45ec4401ae05dcc2faa8455b168aa39d7da2f3b))
+* tell callers with no namespaces why the UI is empty ([#21](https://github.com/splattner/hubble-authz-proxy/issues/21)) ([fd5abeb](https://github.com/splattner/hubble-authz-proxy/commit/fd5abeb05f48e23cf390b0a00f7db240c0519159))
+
+
+### Bug Fixes
+
+* bound memory growth and refuse silently-broken scale-out ([#19](https://github.com/splattner/hubble-authz-proxy/issues/19)) ([805cd91](https://github.com/splattner/hubble-authz-proxy/commit/805cd91c186cb1c139657072e17c529160eda868))
+
 ## [0.5.1](https://github.com/splattner/hubble-authz-proxy/compare/v0.5.0...v0.5.1) (2026-08-12)
 
 
