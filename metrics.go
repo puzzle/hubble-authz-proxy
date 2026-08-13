@@ -19,6 +19,10 @@ const (
 	outcomeAuthzError      = "authz_error"
 	outcomeClientGone      = "client_gone"
 	outcomeUpstreamError   = "upstream_error"
+	// responseTooLarge is separate from upstream_error because it is a limit we
+	// chose, not a fault: seeing it means --max-response-bytes needs raising, or
+	// the cluster outgrew what one response can carry.
+	outcomeResponseTooLarge = "response_too_large"
 	// passthrough is the one outcome not tied to an API route.
 	outcomePassthrough = "passthrough"
 	routeNone          = "-"
@@ -31,6 +35,7 @@ var requestOutcomes = []string{
 	outcomeAuthzError,
 	outcomeClientGone,
 	outcomeUpstreamError,
+	outcomeResponseTooLarge,
 }
 
 // Metrics are served on their own listener, never on the proxy port. The proxy
@@ -78,6 +83,22 @@ var (
 		Name: "hubble_authz_tracked_channels",
 		Help: "Client channels with retained service-map state.",
 	})
+
+	// A plain Counter, so it exports at zero on registration without needing an
+	// entry in initLabelCombinations. Label-free by design: this is a capacity
+	// signal, and there is nothing to break it down by that is not either
+	// unbounded or caller-controlled.
+	channelEvictionsTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hubble_authz_channel_evictions_total",
+		Help: "Live channels dropped to stay under --max-channels. " +
+			"Sustained nonzero means the limit is too low for the number of " +
+			"concurrent sessions; affected clients briefly lose service-map links.",
+	})
+
+	buildInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+		Name: "hubble_authz_build_info",
+		Help: "Always 1. Carries the running version as a label.",
+	}, []string{"version"})
 )
 
 // metricsRegistry is process-local rather than the default registry so tests can
@@ -94,8 +115,13 @@ func metricsRegistry() *prometheus.Registry {
 		scopeCacheTotal,
 		subjectAccessReviewsTotal,
 		trackedChannels,
+		channelEvictionsTotal,
+		buildInfo,
 	)
 	initLabelCombinations()
+	// Answers "which version is actually running" from Prometheus alone, which
+	// is otherwise only visible by inspecting the pod.
+	buildInfo.WithLabelValues(version).Set(1)
 	return reg
 }
 

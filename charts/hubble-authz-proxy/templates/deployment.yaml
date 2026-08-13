@@ -49,7 +49,11 @@ spec:
             - --authz={{ .Values.authz.mode }}
             - --require-both-endpoints={{ .Values.proxy.requireBothEndpoints }}
             - --channel-ttl={{ .Values.proxy.channelTTL }}
+            - --max-channels={{ int .Values.proxy.maxChannels }}
             - --shutdown-timeout={{ .Values.proxy.shutdownTimeout }}
+            {{- /* int64: Helm renders large numbers in scientific notation
+                   otherwise, and 8.388608e+06 is not a valid flag value. */}}
+            - --max-response-bytes={{ int64 .Values.proxy.maxResponseBytes }}
             - --log-level={{ .Values.proxy.logLevel }}
             - --log-format={{ .Values.proxy.logFormat }}
             - --metrics-listen={{ if .Values.metrics.enabled }}:{{ .Values.metrics.port }}{{ end }}

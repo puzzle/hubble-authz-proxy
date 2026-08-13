@@ -48,10 +48,13 @@ func main() {
 		rbacTTL       = flag.Duration("rbac-ttl", 60*time.Second, "rbac mode: cache TTL for a caller's resolved namespace set")
 		rbacWorkers   = flag.Int("rbac-concurrency", 16, "rbac mode: SubjectAccessReviews issued in parallel per resolution")
 		channelTTL    = flag.Duration("channel-ttl", 10*time.Minute, "how long to keep per-channel service-map state after a client goes idle")
+		maxChannels   = flag.Int("max-channels", defaultMaxChannels, "cap on client channels holding service-map state; the least recently used is dropped past this")
 		reqBoth       = flag.Bool("require-both-endpoints", false, "only show traffic when BOTH endpoints are in allowed namespaces (stricter)")
 		shutdownGrace = flag.Duration("shutdown-timeout", 20*time.Second, "how long to let in-flight requests finish after SIGTERM")
-		logLevel      = flag.String("log-level", "info", "debug | info | warn | error. debug logs the identity and resolved scope of every request")
-		logFormat     = flag.String("log-format", "text", "text | json")
+		maxResponse   = flag.Int64("max-response-bytes", 8<<20,
+			"largest backend response the proxy will buffer to filter. The whole body is held in memory, so peak usage is roughly this times the number of concurrent callers; oversized responses are refused, never forwarded unfiltered")
+		logLevel  = flag.String("log-level", "info", "debug | info | warn | error. debug logs the identity and resolved scope of every request")
+		logFormat = flag.String("log-format", "text", "text | json")
 	)
 	flag.Parse()
 
@@ -96,9 +99,10 @@ func main() {
 	authz = instrumentedAuthorizer{next: authz, mode: *mode}
 
 	reg := newServiceRegistry(*channelTTL)
+	reg.maxChannels = *maxChannels
 	go reg.RunSweeper(ctx)
 
-	proxy := NewProxy(backend, authz, reg, *apiPrefix, *reqBoth, *identityPfx, logger)
+	proxy := NewProxy(backend, authz, reg, *apiPrefix, *reqBoth, *identityPfx, *maxResponse, logger)
 
 	srv := &http.Server{
 		Addr:              *listen,
@@ -128,6 +132,8 @@ func main() {
 		"authz", *mode,
 		"requireBothEndpoints", *reqBoth,
 		"identityHeaders", *identityPfx+"-*",
+		"maxResponseBytes", *maxResponse,
+		"maxChannels", *maxChannels,
 		"logLevel", *logLevel)
 
 	serveErr := make(chan error, 1)

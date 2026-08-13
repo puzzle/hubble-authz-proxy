@@ -1,3 +1,21 @@
+# -- Keep this at 1 unless you have read the note below.
+#
+# The proxy is STATEFUL per client. ui.ServiceLink names its endpoints by opaque
+# service ID and carries no namespace; the mapping appears only in the
+# ServiceState event announcing the service, which may have arrived on an
+# earlier poll. The proxy remembers it in the memory of the pod that saw it.
+#
+# So if a client's polls are spread across replicas, the pod handling this one
+# has never seen those announcements. Unknown endpoints are failed closed —
+# correctly — and the user's service map loses edges at random, with nothing
+# logged and no error anywhere. It reads as "Hubble is flaky", not as a
+# misconfiguration.
+#
+# Going above 1 therefore requires service.sessionAffinity: ClientIP (or
+# hubbleUI.service.sessionAffinity in standalone mode); the chart refuses to
+# render otherwise. Note that affinity on the Service is not always sufficient:
+# an ingress controller that balances straight to pod IPs (Traefik and Cilium's
+# ingress can) bypasses it and needs its own stickiness.
 replicaCount: 1
 
 image:
@@ -72,6 +90,9 @@ hubbleUI:
     type: ClusterIP
     port: 80
     annotations: {}
+    # -- Required when replicaCount > 1; see the note there. "" or ClientIP.
+    sessionAffinity: ""
+    sessionAffinityConfig: {}
 
   ingress:
     enabled: false
@@ -184,6 +205,28 @@ proxy:
   requireBothEndpoints: false
   # -- How long per-channel service-map state is kept after a client goes idle.
   channelTTL: 10m
+  # -- Cap on client channels holding service-map state.
+  #
+  # A reload, a navigation or a namespace switch each start a fresh channel and
+  # abandon the old one, so on channelTTL alone a busy UI accumulates one
+  # cluster-sized service map per abandoned session for the whole idle period.
+  # Past this cap the least recently used channel is dropped.
+  #
+  # Roughly one channel per active browser tab, so the default is generous.
+  # Watch hubble_authz_channel_evictions_total: sustained nonzero means live
+  # sessions are being dropped and briefly losing service-map links. 0 disables
+  # the cap and restores unbounded growth.
+  maxChannels: 1024
+  # -- Largest backend response the proxy will buffer in order to filter it.
+  #
+  # The whole body is held in memory while it is decoded, filtered and
+  # re-encoded, so peak usage is roughly this times the number of callers
+  # polling at once — keep it well under resources.limits.memory. Service-map
+  # responses are the large ones and grow with cluster size; a few hundred KB is
+  # typical. Oversized responses are refused with 502, never forwarded
+  # unfiltered, and are counted as outcome="response_too_large".
+  maxResponseBytes: 8388608  # 8 MiB
+
   # -- debug | info | warn | error
   #
   # debug logs the identity and resolved scope of every request, which is the
@@ -276,6 +319,11 @@ service:
   type: ClusterIP
   port: 8090
   annotations: {}
+  # -- Required when replicaCount > 1; see the note there. "" or ClientIP.
+  sessionAffinity: ""
+  sessionAffinityConfig: {}
+  #  clientIP:
+  #    timeoutSeconds: 10800
 
 # -- Restrict who may reach the proxy.
 #
