@@ -11,6 +11,14 @@ metadata:
   {{- end }}
 spec:
   type: {{ .Values.hubbleUI.service.type }}
+  {{- if .Values.hubbleUI.service.sessionAffinity }}
+  {{- /* Load-bearing above one replica: see the note on replicaCount. */}}
+  sessionAffinity: {{ .Values.hubbleUI.service.sessionAffinity }}
+  {{- with .Values.hubbleUI.service.sessionAffinityConfig }}
+  sessionAffinityConfig:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
   ports:
     {{- /* With the oauth2-proxy sidecar it must be the entry point, or traffic
            would reach the frontend having skipped authentication entirely. */}}

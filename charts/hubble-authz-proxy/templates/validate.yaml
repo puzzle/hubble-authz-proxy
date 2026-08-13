@@ -1,0 +1,6 @@
+{{/*
+Renders nothing. Exists so the checks in _validate.tpl actually run: Helm
+processes every template file, but a define is only evaluated where it is
+included, and files beginning with an underscore produce no manifest.
+*/}}
+{{- include "hubble-authz-proxy.validate" . -}}

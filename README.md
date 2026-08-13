@@ -361,6 +361,7 @@ never a match on its own.
 | `--authz-config` | `/etc/hubble-authz/mapping.yaml` | Static mapping file |
 | `--rbac-ttl` | `60s` | Cache TTL for a resolved namespace set |
 | `--channel-ttl` | `10m` | How long per-channel service-map state survives an idle client |
+| `--max-channels` | `1024` | Cap on channels holding service-map state; past it the least recently used is dropped. `0` disables |
 | `--require-both-endpoints` | `false` | Strict cross-namespace policy |
 | `--metrics-listen` | `:9090` | Serves `/metrics` and `/healthz`; empty disables it |
 | `--max-response-bytes` | `8388608` | Largest response the proxy will buffer to filter; oversized ones are refused |
@@ -388,6 +389,8 @@ rule, `networkPolicy.metricsIngressFrom`; leaving it empty blocks Prometheus.
 | `hubble_authz_scope_cache_total` | counter | `result` |
 | `hubble_authz_subjectaccessreviews_total` | counter | — |
 | `hubble_authz_tracked_channels` | gauge | — |
+| `hubble_authz_channel_evictions_total` | counter | — |
+| `hubble_authz_build_info` | gauge | `version` |
 
 All label values come from fixed sets, never from request contents, so a caller
 cannot inflate cardinality. Every known series is exported at zero on startup —
@@ -427,6 +430,44 @@ sum(rate(hubble_authz_requests_total{outcome="response_too_large"}[5m]))
 Any hit there means the limit needs raising, or the cluster has outgrown what
 one response can carry — it is a configured bound, not a fault, which is why it
 is a separate outcome from `upstream_error`.
+
+### Retained per-client state
+
+The proxy holds a service-ID → namespace map per client channel, because
+`ServiceLink` names its endpoints by opaque ID and the announcing `ServiceState`
+event may have arrived on an earlier poll. A reload, a navigation or a namespace
+switch each start a fresh channel and abandon the old one, so `--channel-ttl`
+alone lets a busy UI accumulate one cluster-sized map per abandoned session.
+
+`--max-channels` bounds that, dropping the least recently used first — expired
+channels before live ones. Evicting a *live* channel is safe but not free: that
+client's next poll finds its service IDs unknown, and unknown endpoints are
+failed closed, so some links disappear from their map until the backend
+re-announces those services.
+
+```promql
+# Live sessions being dropped: --max-channels is too low for the concurrency.
+sum(rate(hubble_authz_channel_evictions_total[5m])) > 0
+
+# Which version is actually running.
+hubble_authz_build_info
+```
+
+### Scaling out
+
+**This state is per pod, so the proxy is stateful per client.** Spread one
+client's polls across replicas and the pod handling this one never saw the
+announcements — links vanish from the service map at random, with nothing logged
+and no error raised. It looks like Hubble being flaky rather than a
+misconfiguration, which is why the chart **refuses to render** with
+`replicaCount > 1` unless `service.sessionAffinity` (or
+`hubbleUI.service.sessionAffinity` in standalone mode) is `ClientIP`.
+
+Service-level affinity is necessary but not always sufficient: an ingress
+controller that load-balances straight to pod IPs — Traefik and Cilium's own
+ingress can — bypasses `sessionAffinity` entirely and needs its own stickiness.
+`replicaCount: 1` is the configuration with no such caveat, and for a component
+in front of a monitoring UI it is usually the right one.
 
 ### Diagnosing "this user sees nothing"
 

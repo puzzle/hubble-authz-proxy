@@ -19,13 +19,25 @@ import (
 // State is keyed by customprotocol channel ID, which is the backend's per-client
 // stream identity, so one user's service map never informs another's. Channels
 // are swept after an idle period because clients abandon them silently.
+//
+// The channel count is bounded as well as swept. A page reload, a navigation or
+// a namespace switch each mint a fresh channel and abandon the old one, so on
+// the TTL alone a busy UI accumulates one cluster-sized service map per
+// abandoned session for the whole idle period. That is the same unbounded-growth
+// shape as reading a response body without a limit, and the same failure:
+// an OOMKill that takes Hubble UI down for everyone.
 type serviceRegistry struct {
-	ttl time.Duration
-	now func() time.Time
+	ttl         time.Duration
+	maxChannels int
+	now         func() time.Time
 
 	mu       sync.Mutex
 	channels map[string]*channelServices
 }
+
+// defaultMaxChannels is generous next to real use — one channel per active
+// browser tab — while still capping worst-case memory at a few tens of MB.
+const defaultMaxChannels = 1024
 
 type channelServices struct {
 	lastSeen   time.Time
@@ -39,9 +51,10 @@ type channelServices struct {
 
 func newServiceRegistry(ttl time.Duration) *serviceRegistry {
 	return &serviceRegistry{
-		ttl:      ttl,
-		now:      time.Now,
-		channels: map[string]*channelServices{},
+		ttl:         ttl,
+		maxChannels: defaultMaxChannels,
+		now:         time.Now,
+		channels:    map[string]*channelServices{},
 	}
 }
 
@@ -63,13 +76,57 @@ func (r *serviceRegistry) remember(channelID, serviceID, namespace string) {
 func (r *serviceRegistry) channelLocked(channelID string) *channelServices {
 	ch := r.channels[channelID]
 	if ch == nil {
+		r.makeRoomLocked()
 		ch = &channelServices{
 			namespaces: map[string]string{},
 			peers:      map[string]bool{},
 		}
 		r.channels[channelID] = ch
+		trackedChannels.Set(float64(len(r.channels)))
 	}
 	return ch
+}
+
+// makeRoomLocked ensures there is space for one more channel. Caller holds r.mu.
+//
+// Expired channels go first, since dropping those costs nothing. Only if the
+// registry is still full of live channels does it evict the least recently seen.
+//
+// Evicting a live channel is safe but not free: the caller's next poll finds its
+// service IDs unknown, and unknown endpoints are failed closed, so some links
+// vanish from their map until the backend re-announces those services. That is
+// the right trade against an OOMKill, and it is why the eviction is counted —
+// a nonzero rate means --max-channels is too low for the number of concurrent
+// sessions, not that anything is wrong with the filter.
+func (r *serviceRegistry) makeRoomLocked() {
+	if r.maxChannels <= 0 || len(r.channels) < r.maxChannels {
+		return
+	}
+
+	cutoff := r.now().Add(-r.ttl)
+	for id, ch := range r.channels {
+		if ch.lastSeen.Before(cutoff) {
+			delete(r.channels, id)
+		}
+	}
+	if len(r.channels) < r.maxChannels {
+		return
+	}
+
+	for len(r.channels) >= r.maxChannels {
+		var oldestID string
+		var oldest time.Time
+		for id, ch := range r.channels {
+			if oldestID == "" || ch.lastSeen.Before(oldest) {
+				oldestID, oldest = id, ch.lastSeen
+			}
+		}
+		if oldestID == "" {
+			return
+		}
+		delete(r.channels, oldestID)
+		channelEvictionsTotal.Inc()
+	}
 }
 
 // rememberPeer records a service the caller may see because it is linked to one
