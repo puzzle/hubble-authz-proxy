@@ -12,11 +12,10 @@
   "timezone": "Europe/Zurich",
   "customManagers": [
     {
-      "description": "hubble-ui-backend image pinned in the e2e harness and pre-pulled by its workflow. Not a normal dependency: it must stay in step with the github.com/cilium/hubble-ui/backend module pin, so it is grouped with it below. Both files are listed because the tag is written in both and they must not drift apart.",
+      "description": "The hubble-ui-backend image the e2e harness compiles and runs against by default. Not a normal dependency: it must stay in step with the github.com/cilium/hubble-ui/backend module pin, so it is grouped with it below. Deliberately scoped to e2e_test.go only: the E2E matrix in .github/workflows/e2e.yml lists OLDER versions on purpose, and bumping those would collapse the matrix onto one version and silently retire the back-compat coverage. Matrix entries are written as bare tags so this regex cannot match them either way. TestE2EMatrixCoversDefaultPin fails if a bump here leaves the matrix behind.",
       "customType": "regex",
       "managerFilePatterns": [
-        "/^e2e_test\\.go$/",
-        "/^\\.github/workflows/e2e\\.yml$/"
+        "/^e2e_test\\.go$/"
       ],
       "matchStrings": [
         "quay\\.io/cilium/hubble-ui-backend:(?<currentValue>v[0-9][^\"\\s]*)"
