@@ -41,13 +41,13 @@ func knownRoute(s string) string {
 // route is the route name the BACKEND reported in its response envelope, not
 // anything the client supplied, so a client cannot pick which filter runs by
 // lying about the URL or the request meta.
-func (p *Proxy) filterBody(route, channelID string, body []byte, scope Scope) ([]byte, error) {
+func (p *Proxy) filterBody(route, channelID string, body []byte, scope Scope, id Identity) ([]byte, error) {
 	if len(body) == 0 {
 		return body, nil
 	}
 	switch route {
 	case routeControlStream:
-		return p.filterControlStream(body, scope)
+		return p.filterControlStream(channelID, body, scope, id)
 	case routeServiceMapStre:
 		return p.filterServiceMapStream(channelID, body, scope)
 	default:
@@ -62,7 +62,7 @@ func (p *Proxy) filterBody(route, channelID string, body []byte, scope Scope) ([
 // filterControlStream drops namespaces the caller may not see from the UI's
 // namespace picker. Notifications (relay/k8s connection state, server status)
 // are cluster-wide and pass through.
-func (p *Proxy) filterControlStream(body []byte, scope Scope) ([]byte, error) {
+func (p *Proxy) filterControlStream(channelID string, body []byte, scope Scope, id Identity) ([]byte, error) {
 	resp := &uipb.GetControlStreamResponse{}
 	if err := proto.Unmarshal(body, resp); err != nil {
 		return nil, fmt.Errorf("unmarshal GetControlStreamResponse: %w", err)
@@ -82,9 +82,71 @@ func (p *Proxy) filterControlStream(body []byte, scope Scope) ([]byte, error) {
 			eventsTotal.WithLabelValues("namespace_state", "dropped").Inc()
 		}
 	}
+
+	// A caller the authorizer granted nothing gets an empty picker and no
+	// explanation, which is indistinguishable from Hubble being broken — the
+	// single most common support report this project produces. Replace the empty
+	// list with a notification the UI already knows how to render.
+	//
+	// Safe to substitute rather than append: GetControlStreamResponse.event is a
+	// oneof, so one message carries namespaces OR a notification, never both.
+	// Nothing is lost here because the list we would have sent is empty.
+	if p.notifyEmptyScope && len(scope.Namespaces) == 0 &&
+		p.services.markEmptyScopeNotified(channelID) {
+		emptyScopeNotifications.Inc()
+		p.log.Info("caller has no visible namespaces; sending them a NoPermission notice",
+			"user", cmpOr(id.Email, id.User), "groups", id.Groups)
+		return proto.Marshal(noPermissionResponse(id))
+	}
+
 	states.Namespaces = kept
 
 	return proto.Marshal(resp)
+}
+
+// noPermissionResponse builds the notification hubble-ui renders in its Status
+// Center. The UI's own wording is fixed, so the two fields have to be chosen to
+// fit it (see ui-layer/status-center.ts):
+//
+//	title:   You have no permissions to watch over "<resource>" resource
+//	details: <error>
+//
+// So resource has to complete that sentence, and error is the only place an
+// actionable explanation fits.
+func noPermissionResponse(id Identity) *uipb.GetControlStreamResponse {
+	who := cmpOr(id.Email, id.User)
+	if who == "" {
+		who = "your account"
+	}
+	// What to ask for depends on what the admin has to work with. Saying "or one
+	// of these groups" when no groups arrived is worse than unhelpful: an empty
+	// group list is itself the likely cause, and the wording would hide it.
+	ask := "ask an administrator to grant this user access."
+	if len(id.Groups) > 0 {
+		// Bounded: a caller can present arbitrarily many groups, and this string
+		// is rendered in a browser.
+		groups := id.Groups
+		suffix := ""
+		if len(groups) > 8 {
+			groups, suffix = groups[:8], ", …"
+		}
+		who += " (groups: " + strings.Join(groups, ", ") + suffix + ")"
+		ask = "ask an administrator to grant this user or one of these groups access."
+	}
+
+	return &uipb.GetControlStreamResponse{
+		Event: &uipb.GetControlStreamResponse_Notification{
+			Notification: &uipb.Notification{
+				Notification: &uipb.Notification_NoPermission{
+					NoPermission: &uipb.NoPermission{
+						Resource: "namespaces",
+						Error: "No namespaces are visible to " + who + ". " +
+							"Hubble access is granted per namespace by hubble-authz-proxy; " + ask,
+					},
+				},
+			},
+		},
+	}
 }
 
 // filterServiceMapStream drops flows, services and service-map edges the caller

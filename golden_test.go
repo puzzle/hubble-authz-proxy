@@ -67,7 +67,7 @@ func TestGoldenNodeStatusReachesScopedCaller(t *testing.T) {
 	p := testProxy(false)
 	// A caller scoped to a namespace that does not appear anywhere in the
 	// payload: nothing here is theirs, yet the status still passes.
-	out, err := p.filterBody(route, channel, body, scopeOf("some-unrelated-ns"))
+	out, err := p.filterBody(route, channel, body, scopeOf("some-unrelated-ns"), Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestGoldenNamespacesAreFiltered(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := testProxy(false).filterBody(route, channel, nsBody, scopeOf("payments"))
+	out, err := testProxy(false).filterBody(route, channel, nsBody, scopeOf("payments"), Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}
