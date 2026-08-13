@@ -45,6 +45,7 @@ func main() {
 			"header family carrying the caller identity: X-Auth-Request (nginx auth_request / Traefik forwardAuth) or X-Forwarded (oauth2-proxy as the reverse proxy)")
 		mode          = flag.String("authz", "static", "authorization backend: static | rbac")
 		mapFile       = flag.String("authz-config", "/etc/hubble-authz/mapping.yaml", "static mode: group/user -> namespace mapping")
+		mapReload     = flag.Duration("authz-config-reload", 30*time.Second, "static mode: how often to re-read the mapping file; 0 disables and makes changes need a pod restart")
 		rbacTTL       = flag.Duration("rbac-ttl", 60*time.Second, "rbac mode: cache TTL for a caller's resolved namespace set")
 		rbacWorkers   = flag.Int("rbac-concurrency", 16, "rbac mode: SubjectAccessReviews issued in parallel per resolution")
 		channelTTL    = flag.Duration("channel-ttl", 10*time.Minute, "how long to keep per-channel service-map state after a client goes idle")
@@ -82,7 +83,12 @@ func main() {
 	var authz Authorizer
 	switch *mode {
 	case "static":
-		authz, err = NewStaticAuthorizer(*mapFile)
+		var staticAuthz *StaticAuthorizer
+		staticAuthz, err = NewStaticAuthorizer(*mapFile, logger)
+		if err == nil {
+			go staticAuthz.RunReloader(ctx, *mapReload)
+			authz = staticAuthz
+		}
 	case "rbac":
 		var rbacAuthz *RBACAuthorizer
 		rbacAuthz, err = NewRBACAuthorizer(*rbacTTL, *rbacWorkers)
@@ -131,6 +137,7 @@ func main() {
 		"metrics", *metricsListen,
 		"backend", backend.String(),
 		"authz", *mode,
+		"mappingReload", mapReload.String(),
 		"requireBothEndpoints", *reqBoth,
 		"identityHeaders", *identityPfx+"-*",
 		"maxResponseBytes", *maxResponse,

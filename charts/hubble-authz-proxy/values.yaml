@@ -292,12 +292,25 @@ authz:
   # namespaces/concurrency round trips.
   concurrency: 16
 
+  # -- How often the proxy re-reads the mapping file (mode=static).
+  #
+  # kubelet updates a mounted ConfigMap in place, so without this an edit
+  # appears to work — the ConfigMap changes, the file inside the pod changes —
+  # and does nothing until the pod restarts. Revocations are delayed the same
+  # way, which is the direction that matters.
+  #
+  # A failed read or an unparseable file KEEPS THE PREVIOUS MAPPING, so a
+  # half-written file cannot lock everyone out. That failure is loud rather than
+  # silent: alert on hubble_authz_mapping_last_reload_timestamp_seconds going
+  # stale, which also catches a reloader that stopped.
+  #
+  # Set to 0 to disable and go back to requiring a restart. Note kubelet's own
+  # sync period (~1 min by default) sets the real floor on how fast an edit can
+  # possibly arrive; polling faster than that does not help.
+  reloadInterval: 30s
+
   # Used when mode=static. Rendered into a ConfigMap and mounted at
   # /etc/hubble-authz/mapping.yaml.
-  #
-  # NOTE: the proxy reads this file once at startup, so changing it requires a
-  # pod restart. Enable checksumAnnotation to have Helm roll the Deployment
-  # automatically when the mapping changes.
   mapping:
     admins: []
     #  - platform-admins
@@ -315,6 +328,10 @@ authz:
   existingConfigMap: ""
 
   # -- Roll the Deployment when the mapping ConfigMap changes.
+  #
+  # Only applied when reloadInterval is 0. With hot-reload on, restarting every
+  # pod on a mapping edit is pure disruption — it kills the long-poll requests
+  # the UI holds open, which shows up as errors in the browser.
   checksumAnnotation: true
 
 serviceAccount:
