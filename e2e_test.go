@@ -42,9 +42,29 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-// Matches the hubble-ui-backend shipped by Cilium v1.19.1. Keep in step with the
-// go.mod pin: the point of these tests is to catch that pairing drifting.
-const backendImage = "quay.io/cilium/hubble-ui-backend:v0.13.5"
+// defaultBackendImage is the hubble-ui-backend our go.mod is compiled against,
+// and what runs with no override. Keep it in step with the module pin.
+const defaultBackendImage = "quay.io/cilium/hubble-ui-backend:v0.13.5"
+
+// backendImage picks the backend to test against.
+//
+// We ship ONE binary, compiled against one set of hubble-ui protos, and users
+// point it at whatever backend their Cilium deploys. So the interesting axis is
+// not "recompile against every version" — it is "does the binary we ship still
+// read every backend in the support window". Overriding this env var and leaving
+// go.mod alone reproduces exactly that situation; the CI matrix does nothing
+// more than set it.
+//
+// Note the axis is the hubble-ui version, NOT the Cilium version: Cilium 1.19.5,
+// 1.20.0 and 1.21.0-pre.0 all ship the same hubble-ui v0.13.5, so a matrix over
+// Cilium releases would run identical images and prove nothing. See
+// .github/workflows/e2e.yml for the mapping.
+func backendImage() string {
+	if img := os.Getenv("E2E_BACKEND_IMAGE"); img != "" {
+		return img
+	}
+	return defaultBackendImage
+}
 
 // The backend picks its scenario from a preset name, and tenant-jobs is the one
 // that reads flows from log files. The namespace list it reports is hardcoded in
@@ -143,6 +163,9 @@ func startBackend(t *testing.T, fixtureDir string) string {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")
 	}
+	image := backendImage()
+	t.Logf("backend image: %s", image)
+
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
 
@@ -152,10 +175,17 @@ func startBackend(t *testing.T, fixtureDir string) string {
 		"-e", "E2E_LOGFILES_BASEPATH=/e2e",
 		"-e", "EVENTS_SERVER_PORT=8090",
 		"-v", fixtureDir+":/e2e:ro",
-		backendImage,
+		image,
 	).CombinedOutput()
 	if err != nil {
-		t.Skipf("cannot start %s: %v\n%s", backendImage, err, out)
+		// Skipping is right for "no docker / cannot pull", but NOT in CI: a
+		// matrix job that silently skips is indistinguishable from one that
+		// passed, which would quietly retire the coverage this matrix exists
+		// to add.
+		if os.Getenv("CI") != "" {
+			t.Fatalf("cannot start %s: %v\n%s", image, err, out)
+		}
+		t.Skipf("cannot start %s: %v\n%s", image, err, out)
 	}
 	id := strings.TrimSpace(string(out))
 	t.Cleanup(func() {
@@ -491,4 +521,34 @@ func keys(m map[string]bool) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestE2EMatrixCoversDefaultPin asserts the CI matrix still lists the version we
+// compile against.
+//
+// Renovate bumps defaultBackendImage in lockstep with the go.mod module pin, but
+// it deliberately does NOT touch the matrix — which version range we support is a
+// decision, not a dependency update. Without this check that combination degrades
+// silently: the matrix would keep testing two versions we no longer build
+// against, every job would stay green, and the version users actually run would
+// have no coverage at all. Same failure shape as a metric that is never exported
+// at zero, and just as invisible.
+func TestE2EMatrixCoversDefaultPin(t *testing.T) {
+	const workflow = ".github/workflows/e2e.yml"
+
+	raw, err := os.ReadFile(workflow)
+	if err != nil {
+		t.Fatalf("read %s: %v", workflow, err)
+	}
+	_, tag, ok := strings.Cut(defaultBackendImage, ":")
+	if !ok {
+		t.Fatalf("defaultBackendImage %q has no tag", defaultBackendImage)
+	}
+	// The matrix lists bare tags, one per "- ui:" entry.
+	if !strings.Contains(string(raw), "ui: "+tag+"\n") {
+		t.Errorf("%s has no matrix entry for %q (from defaultBackendImage).\n"+
+			"A dependency bump moved the pin without moving the support window: "+
+			"add it to the matrix, and drop any entry no longer worth testing.",
+			workflow, tag)
+	}
 }

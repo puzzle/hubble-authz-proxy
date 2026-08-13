@@ -535,10 +535,41 @@ are identified, would be invisible. `testdata/` holds a real control-stream
 response captured from a live cluster (node names and addresses replaced with
 placeholders) to guard the decode path the same way.
 
-Keep `backendImage` in [e2e_test.go](e2e_test.go) in step with the
-`hubble-ui/backend` pin in `go.mod` — catching that pairing drift is the point.
-
 Go 1.26+ is required — the `hubble-ui/backend` module sets that floor.
+
+### Version coverage
+
+CI runs the suite against **every hubble-ui backend the supported Cilium releases
+ship**, using one binary compiled against a single set of protos — which is
+exactly how it is deployed. Override the image to reproduce a matrix job locally:
+
+```console
+E2E_BACKEND_IMAGE=quay.io/cilium/hubble-ui-backend:v0.13.3 \
+  go test -tags e2e -count=1 -run TestE2E ./...
+```
+
+The axis is the **hubble-ui version, not the Cilium version**. Cilium 1.18.10+,
+1.19.4+, 1.20.x and 1.21.0-pre.0 all ship the same hubble-ui `v0.13.5`, so a
+matrix over Cilium releases would pull identical images. Only two backends exist
+across the whole window:
+
+| hubble-ui | Shipped by |
+| --- | --- |
+| `v0.13.5` | Cilium 1.18.10+, 1.19.4+, 1.20.x, 1.21 (pre) — the `go.mod` pin |
+| `v0.13.3` | Cilium ≤1.17.x, 1.18.0–1.18.9, 1.19.0–1.19.3 |
+
+That mapping moves *within* a patch line — 1.19.3 shipped `v0.13.3` and 1.19.4
+shipped `v0.13.5` — and no dependency bot reports it, because from this repo's
+side nothing changed. So the table is a snapshot, and
+[`hack/check-hubble-ui-matrix.sh`](hack/check-hubble-ui-matrix.sh) is what keeps
+it true: it reads `values.yaml` from the newest patch of each supported Cilium
+line and fails nightly if a version reaches users untested. Widening the matrix
+stays a human decision — dropping the oldest entry means dropping support.
+
+Renovate bumps only `defaultBackendImage` (the compile target); it is scoped away
+from the matrix so a routine bump cannot collapse it onto one version and quietly
+retire the back-compat coverage. `TestE2EMatrixCoversDefaultPin` fails if the two
+drift apart.
 
 Testing against a real cluster without deploying:
 

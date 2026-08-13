@@ -9,8 +9,8 @@ on:
     push:
         branches: [main]
     schedule:
-        # The backend image is pinned, but this also exercises our reading of an
-        # internal protocol; a nightly run surfaces breakage before a release.
+        # The backend images are pinned, but this also exercises our reading of
+        # an internal protocol; a nightly run surfaces breakage before a release.
         - cron: "0 3 * * *"
     workflow_dispatch:
 
@@ -19,9 +19,33 @@ permissions:
 
 jobs:
     e2e:
-        name: End-to-end against real hubble-ui backend
+        name: hubble-ui ${{ matrix.ui }}
         runs-on: ubuntu-latest
         timeout-minutes: 15
+        strategy:
+            # One version failing is the interesting result; the others still
+            # need to report so we learn whether it is version-specific.
+            fail-fast: false
+            matrix:
+                # The axis is the HUBBLE-UI version, not the Cilium version.
+                # Cilium 1.19.4, 1.20.0 and 1.21.0-pre.0 all ship the same
+                # hubble-ui v0.13.5, so a matrix over Cilium releases would pull
+                # identical images and prove nothing.
+                #
+                # Which tag a Cilium release ships also changes within a minor
+                # line — 1.19.3 shipped v0.13.3 and 1.19.4 shipped v0.13.5 — so
+                # the ranges below are a snapshot, not a contract. The
+                # matrix-drift job checks them against upstream nightly.
+                #
+                # Renovate does not maintain this list on purpose: it bumps the
+                # compile target (defaultBackendImage in e2e_test.go), while the
+                # support window is a decision. TestE2EMatrixCoversDefaultPin
+                # fails if the two drift apart.
+                include:
+                    - ui: v0.13.5
+                      covers: Cilium 1.18.10+, 1.19.4+, 1.20.x, 1.21 (pre) - matches the go.mod pin
+                    - ui: v0.13.3
+                      covers: Cilium <=1.17.x, 1.18.0-1.18.9, 1.19.0-1.19.3
         steps:
             - name: Checkout
               uses: actions/checkout@v7
@@ -33,7 +57,31 @@ jobs:
                   cache: true
 
             - name: Pre-pull backend image
-              run: docker pull quay.io/cilium/hubble-ui-backend:v0.13.5
+              run: docker pull "quay.io/cilium/hubble-ui-backend:${{ matrix.ui }}"
 
             - name: Run e2e suite
-              run: go test -tags e2e -count=1 -run TestE2E -v ./...
+              # CI is set by Actions; the harness turns "cannot start the
+              # container" from a skip into a failure when it sees it, so a
+              # broken matrix entry cannot pass as a silent no-op.
+              env:
+                  E2E_BACKEND_IMAGE: quay.io/cilium/hubble-ui-backend:${{ matrix.ui }}
+              run: |
+                  echo "::notice::hubble-ui ${{ matrix.ui }} covers ${{ matrix.covers }}"
+                  go test -tags e2e -count=1 -run TestE2E -v ./...
+
+    matrix-drift:
+        name: Matrix still matches upstream Cilium
+        # Reads GitHub at run time, so it is deliberately kept off PRs: a Cilium
+        # release must not turn someone's unrelated PR red. Nightly is soon
+        # enough to notice, and the failing job is the notification.
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v7
+
+            - name: Compare matrix against what Cilium ships
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: ./hack/check-hubble-ui-matrix.sh
