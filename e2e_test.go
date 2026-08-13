@@ -230,7 +230,7 @@ func startProxy(t *testing.T, backendURL string, authz Authorizer, requireBoth b
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(NewProxy(u, authz, newServiceRegistry(time.Minute), "/api", requireBoth, AuthRequestPrefix, testMaxResponse, testLogger()))
+	srv := httptest.NewServer(NewProxy(u, authz, newServiceRegistry(time.Minute), "/api", requireBoth, AuthRequestPrefix, testMaxResponse, true, testLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -513,6 +513,72 @@ func TestE2ERejectsMissingIdentity(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Errorf("want a 401 without identity headers, got %v", err)
 	}
+}
+
+// A caller with no namespaces must be told why, over the real wire format. The
+// unit tests build the control-stream body themselves, so only this proves the
+// substituted notification survives a round trip through the real backend's
+// envelope and reaches the client decodable.
+func TestE2EEmptyScopeIsExplained(t *testing.T) {
+	dir := t.TempDir()
+	writeFixtures(t, dir)
+	backend := startBackend(t, dir)
+
+	// Scope{} is what a user in no mapped group resolves to.
+	proxy := startProxy(t, backend, fakeAuthorizer{scope: Scope{}}, false)
+
+	// The channel ID from the first response has to be echoed back on every
+	// later poll. Opening a fresh channel each time instead leaves the backend
+	// with nothing ready to send, so the stream never produces namespaces.
+	channel := ""
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		msg := &cppb.Message{Meta: &cppb.Meta{
+			RouteName: "control-stream", ChannelId: channel,
+		}}
+		payload, err := json.Marshal(msg)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		respBody, err := postRaw(proxy.URL+"/api/control-stream", payload,
+			map[string]string{"Content-Type": "application/json"},
+			map[string]string{"X-Auth-Request-Email": "nobody@example.com"})
+		if err != nil {
+			t.Fatalf("control-stream: %v", err)
+		}
+
+		env := &cppb.Message{}
+		if err := json.Unmarshal(respBody, env); err != nil {
+			t.Fatalf("decode envelope: %v (%s)", err, truncate(respBody))
+		}
+		if channel == "" {
+			channel = env.GetMeta().GetChannelId()
+		}
+		if len(env.GetBody().GetContent()) == 0 {
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+
+		resp := &uipb.GetControlStreamResponse{}
+		if err := proto.Unmarshal(env.GetBody().GetContent(), resp); err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		if np := resp.GetNotification().GetNoPermission(); np != nil {
+			if np.GetResource() == "" || np.GetError() == "" {
+				t.Errorf("notification reached the client empty: %+v", np)
+			}
+			t.Logf("resource=%q error=%q", np.GetResource(), np.GetError())
+			return
+		}
+		// Namespaces may arrive first; what must never happen is any of them
+		// reaching a caller with no scope.
+		if ns := resp.GetNamespaces().GetNamespaces(); len(ns) > 0 {
+			t.Fatalf("a caller with an empty scope was shown %d namespaces", len(ns))
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	t.Error("a caller with no namespaces was never told why their UI is empty")
 }
 
 func keys(m map[string]bool) []string {

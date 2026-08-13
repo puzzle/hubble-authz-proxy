@@ -95,6 +95,14 @@ var (
 			"concurrent sessions; affected clients briefly lose service-map links.",
 	})
 
+	// Label-free for the same reason as channelEvictionsTotal: it exports at zero
+	// on registration with no initLabelCombinations entry to forget.
+	emptyScopeNotifications = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "hubble_authz_empty_scope_notifications_total",
+		Help: "Callers told they have no visible namespaces, once per channel. " +
+			"A rising rate means users are reaching Hubble with no access mapped to them.",
+	})
+
 	buildInfo = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "hubble_authz_build_info",
 		Help: "Always 1. Carries the running version as a label.",
@@ -116,6 +124,7 @@ func metricsRegistry() *prometheus.Registry {
 		subjectAccessReviewsTotal,
 		trackedChannels,
 		channelEvictionsTotal,
+		emptyScopeNotifications,
 		buildInfo,
 	)
 	initLabelCombinations()

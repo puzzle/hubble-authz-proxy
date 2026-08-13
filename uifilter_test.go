@@ -1,6 +1,8 @@
 package main
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -13,6 +15,10 @@ func testProxy(requireBoth bool) *Proxy {
 	return &Proxy{
 		services:    newServiceRegistry(time.Minute),
 		requireBoth: requireBoth,
+		// Matches the shipped default, so these tests exercise the real
+		// configuration rather than a quieter one.
+		notifyEmptyScope: true,
+		log:              testLogger(),
 	}
 }
 
@@ -50,7 +56,7 @@ func filterEvents(t *testing.T, p *Proxy, channelID string, scope Scope, events 
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := p.filterBody(routeServiceMapStre, channelID, body, scope)
+	out, err := p.filterBody(routeServiceMapStre, channelID, body, scope, Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -211,7 +217,7 @@ func TestFilterControlStreamNamespaces(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := p.filterBody(routeControlStream, "ch1", body, scopeOf("payments"))
+	out, err := p.filterBody(routeControlStream, "ch1", body, scopeOf("payments"), Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +249,7 @@ func TestFilterControlStreamPassesNotifications(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := p.filterBody(routeControlStream, "ch1", body, scopeOf("payments"))
+	out, err := p.filterBody(routeControlStream, "ch1", body, scopeOf("payments"), Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,11 +262,202 @@ func TestFilterControlStreamPassesNotifications(t *testing.T) {
 	}
 }
 
+// --- empty-scope notification ---------------------------------------------
+
+// namespacesBody is a control-stream response announcing namespaces the caller
+// may or may not be allowed to see.
+func namespacesBody(t *testing.T, names ...string) []byte {
+	t.Helper()
+	states := make([]*uipb.NamespaceState, 0, len(names))
+	for _, n := range names {
+		states = append(states, &uipb.NamespaceState{
+			Namespace: &uipb.NamespaceDescriptor{Name: n},
+		})
+	}
+	body, err := proto.Marshal(&uipb.GetControlStreamResponse{
+		Event: &uipb.GetControlStreamResponse_Namespaces{
+			Namespaces: &uipb.GetControlStreamResponse_NamespaceStates{Namespaces: states},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return body
+}
+
+func decodeControl(t *testing.T, b []byte) *uipb.GetControlStreamResponse {
+	t.Helper()
+	got := &uipb.GetControlStreamResponse{}
+	if err := proto.Unmarshal(b, got); err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// A caller granted nothing otherwise gets an empty picker and no explanation,
+// which is indistinguishable from Hubble being broken.
+func TestEmptyScopeGetsNoPermissionNotice(t *testing.T) {
+	p := testProxy(false)
+	id := Identity{Email: "bob@example.com", Groups: []string{"devs"}}
+
+	out, err := p.filterBody(routeControlStream, "ch1",
+		namespacesBody(t, "payments", "search"), Scope{}, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	np := decodeControl(t, out).GetNotification().GetNoPermission()
+	if np == nil {
+		t.Fatal("no NoPermission notification; the user is left with a blank UI and no reason")
+	}
+	// resource is interpolated into the UI's own fixed sentence, and error is
+	// rendered as the entry's details.
+	if np.GetResource() != "namespaces" {
+		t.Errorf("resource = %q; it has to complete hubble-ui's wording", np.GetResource())
+	}
+	if !strings.Contains(np.GetError(), "bob@example.com") {
+		t.Errorf("details do not name the identity: %q", np.GetError())
+	}
+	if !strings.Contains(np.GetError(), "devs") {
+		t.Errorf("details do not name the groups an admin would map: %q", np.GetError())
+	}
+}
+
+// The Status Center does not deduplicate — the backend dedupes its own notices —
+// so repeating this per poll would bury the UI in identical warnings.
+func TestEmptyScopeNoticeIsSentOncePerChannel(t *testing.T) {
+	p := testProxy(false)
+
+	first, err := p.filterBody(routeControlStream, "ch1", namespacesBody(t, "payments"), Scope{}, Identity{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decodeControl(t, first).GetNotification().GetNoPermission() == nil {
+		t.Fatal("first poll did not carry the notice")
+	}
+
+	for i := range 3 {
+		again, err := p.filterBody(routeControlStream, "ch1", namespacesBody(t, "payments"), Scope{}, Identity{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := decodeControl(t, again)
+		if got.GetNotification().GetNoPermission() != nil {
+			t.Fatalf("poll %d repeated the notice", i+2)
+		}
+		// And it must still be a well-formed, empty namespace list.
+		if n := got.GetNamespaces().GetNamespaces(); len(n) != 0 {
+			t.Errorf("poll %d leaked namespaces: %v", i+2, n)
+		}
+	}
+
+	// A different channel is a different session and must be told.
+	other, err := p.filterBody(routeControlStream, "ch2", namespacesBody(t, "payments"), Scope{}, Identity{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decodeControl(t, other).GetNotification().GetNoPermission() == nil {
+		t.Error("a second session was never told why its UI is empty")
+	}
+}
+
+// The notice must never stand in for a real answer. A caller with access sees
+// their namespaces, even when this particular batch happens to match none.
+func TestNonEmptyScopeNeverGetsTheNotice(t *testing.T) {
+	p := testProxy(false)
+
+	t.Run("batch matches", func(t *testing.T) {
+		out, err := p.filterBody(routeControlStream, "ch1",
+			namespacesBody(t, "payments", "search"), scopeOf("payments"), Identity{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := decodeControl(t, out)
+		if got.GetNotification().GetNoPermission() != nil {
+			t.Fatal("told a caller with access that they have none")
+		}
+		if n := got.GetNamespaces().GetNamespaces(); len(n) != 1 {
+			t.Errorf("expected 1 namespace, got %v", n)
+		}
+	})
+
+	// The load-bearing case: scope is non-empty but nothing in this batch is in
+	// it. Firing here would cry wolf at users who do have access, e.g. whose
+	// namespaces arrive in a later batch.
+	t.Run("batch matches nothing", func(t *testing.T) {
+		out, err := p.filterBody(routeControlStream, "ch9",
+			namespacesBody(t, "kube-system"), scopeOf("payments"), Identity{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := decodeControl(t, out)
+		if got.GetNotification().GetNoPermission() != nil {
+			t.Error("fired on an unmatched batch rather than an empty scope")
+		}
+		if got.GetNamespaces() == nil {
+			t.Error("dropped the (empty) namespace list entirely")
+		}
+	})
+}
+
+// Turning it off has to restore the previous behaviour exactly, since the flag
+// exists as the escape hatch if a hubble-ui release stops rendering this.
+func TestEmptyScopeNoticeCanBeDisabled(t *testing.T) {
+	p := testProxy(false)
+	p.notifyEmptyScope = false
+
+	out, err := p.filterBody(routeControlStream, "ch1", namespacesBody(t, "payments"), Scope{}, Identity{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := decodeControl(t, out)
+	if got.GetNotification() != nil {
+		t.Error("sent a notification with the feature disabled")
+	}
+	if n := got.GetNamespaces().GetNamespaces(); len(n) != 0 {
+		t.Errorf("leaked namespaces: %v", n)
+	}
+}
+
+// An empty group list is itself a likely cause of an empty scope, so the advice
+// must not point at groups that were never presented.
+func TestEmptyScopeNoticeAdaptsToMissingGroups(t *testing.T) {
+	without := noPermissionResponse(Identity{Email: "bob@example.com"}).
+		GetNotification().GetNoPermission().GetError()
+	if strings.Contains(without, "these groups") {
+		t.Errorf("points at groups the caller never presented: %q", without)
+	}
+
+	with := noPermissionResponse(Identity{Email: "bob@example.com", Groups: []string{"devs"}}).
+		GetNotification().GetNoPermission().GetError()
+	if !strings.Contains(with, "these groups") {
+		t.Errorf("does not offer the groups an admin could map: %q", with)
+	}
+}
+
+// Groups are caller-supplied and unbounded, and this string is rendered in a
+// browser.
+func TestEmptyScopeNoticeBoundsGroups(t *testing.T) {
+	many := make([]string, 50)
+	for i := range many {
+		many[i] = fmt.Sprintf("group-%02d", i)
+	}
+	msg := noPermissionResponse(Identity{Email: "bob@example.com", Groups: many}).
+		GetNotification().GetNoPermission().GetError()
+
+	if strings.Contains(msg, "group-40") {
+		t.Error("group list is not bounded")
+	}
+	if !strings.Contains(msg, "…") {
+		t.Error("truncation is not signalled, so the list reads as complete")
+	}
+}
+
 // A route this proxy does not understand must be refused, not passed through:
 // a hubble-ui upgrade that adds one should break loudly rather than leak.
 func TestFilterUnknownRouteIsRefused(t *testing.T) {
 	p := testProxy(false)
-	if _, err := p.filterBody("some-new-route", "ch1", []byte{0x01}, scopeOf("payments")); err == nil {
+	if _, err := p.filterBody("some-new-route", "ch1", []byte{0x01}, scopeOf("payments"), Identity{}); err == nil {
 		t.Error("unknown route was allowed through")
 	}
 }
@@ -269,7 +466,7 @@ func TestFilterEmptyBodyPassesThrough(t *testing.T) {
 	p := testProxy(false)
 	// Poll responses with no data carry an empty body and must survive, or the
 	// client's long-poll loop breaks.
-	got, err := p.filterBody("some-new-route", "ch1", nil, scopeOf("payments"))
+	got, err := p.filterBody("some-new-route", "ch1", nil, scopeOf("payments"), Identity{})
 	if err != nil || got != nil {
 		t.Errorf("empty body: got %v, %v", got, err)
 	}

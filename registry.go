@@ -47,6 +47,11 @@ type channelServices struct {
 	// namespace so that a namespace with ten services only exposes the one
 	// actually talking to the caller.
 	peers map[string]bool
+	// emptyScopeNotified records that this channel has already been told its
+	// caller can see nothing. The UI's Status Center does not deduplicate — the
+	// backend is what dedupes its own NoPermission notices — so without this the
+	// user collects one identical warning per poll, forever.
+	emptyScopeNotified bool
 }
 
 func newServiceRegistry(ttl time.Duration) *serviceRegistry {
@@ -141,6 +146,31 @@ func (r *serviceRegistry) rememberPeer(channelID, serviceID string) {
 	ch := r.channelLocked(channelID)
 	ch.lastSeen = r.now()
 	ch.peers[serviceID] = true
+}
+
+// markEmptyScopeNotified reports whether this channel still needs to be told
+// that its caller can see nothing, and records that it has been.
+//
+// Returns true exactly once per channel. A channel evicted under --max-channels
+// and then seen again is told a second time, which is the right side to err on:
+// repeating a warning is a nuisance, never showing it is the bug this exists to
+// fix.
+func (r *serviceRegistry) markEmptyScopeNotified(channelID string) bool {
+	if channelID == "" {
+		// No channel to remember against, so sending it every poll would spam.
+		// The UI always supplies one past the first response.
+		return false
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	ch := r.channelLocked(channelID)
+	ch.lastSeen = r.now()
+	if ch.emptyScopeNotified {
+		return false
+	}
+	ch.emptyScopeNotified = true
+	return true
 }
 
 // isPeer reports whether this service was recorded as linked to the caller's

@@ -50,6 +50,7 @@ The backend serves two routes, both carrying protobuf payloads inside a
 | --- | --- | --- |
 | `control-stream` | `NamespaceState` | Only namespaces in scope, so the picker can't enumerate the cluster |
 | `control-stream` | `Notification` | Passed through — cluster-wide status, but see [Known limitations](#known-limitations) |
+| `control-stream` | *(empty scope)* | Replaced with a `NoPermission` notice so the user learns why the UI is blank |
 | `service-map-stream` | `Flow`, `Flows` | Dropped unless an endpoint is in scope |
 | `service-map-stream` | `ServiceState` | Kept when in scope, or when linked to something in scope (lenient only) |
 | `service-map-stream` | `ServiceLinkState` | Both endpoint services resolved to namespaces, then the same rule |
@@ -362,6 +363,7 @@ never a match on its own.
 | `--rbac-ttl` | `60s` | Cache TTL for a resolved namespace set |
 | `--channel-ttl` | `10m` | How long per-channel service-map state survives an idle client |
 | `--max-channels` | `1024` | Cap on channels holding service-map state; past it the least recently used is dropped. `0` disables |
+| `--notify-empty-scope` | `true` | Tell a caller with no visible namespaces why the UI is empty, instead of leaving it blank |
 | `--require-both-endpoints` | `false` | Strict cross-namespace policy |
 | `--metrics-listen` | `:9090` | Serves `/metrics` and `/healthz`; empty disables it |
 | `--max-response-bytes` | `8388608` | Largest response the proxy will buffer to filter; oversized ones are refused |
@@ -390,6 +392,7 @@ rule, `networkPolicy.metricsIngressFrom`; leaving it empty blocks Prometheus.
 | `hubble_authz_subjectaccessreviews_total` | counter | — |
 | `hubble_authz_tracked_channels` | gauge | — |
 | `hubble_authz_channel_evictions_total` | counter | — |
+| `hubble_authz_empty_scope_notifications_total` | counter | — |
 | `hubble_authz_build_info` | gauge | `version` |
 
 All label values come from fixed sets, never from request contents, so a caller
@@ -469,10 +472,36 @@ ingress can — bypasses `sessionAffinity` entirely and needs its own stickiness
 `replicaCount: 1` is the configuration with no such caveat, and for a component
 in front of a monitoring UI it is usually the right one.
 
-### Diagnosing "this user sees nothing"
+### "This user sees nothing"
 
-Almost every report comes down to one of two things, and `--log-level=debug`
-separates them in one line:
+By default the user is now told, so the report should arrive already diagnosed.
+A caller whose scope resolves to no namespaces gets a warning in hubble-ui's
+Status Center instead of a blank picker:
+
+```text
+You have no permissions to watch over "namespaces" resource
+
+No namespaces are visible to bob@example.com (groups: devs, staff). Hubble
+access is granted per namespace by hubble-authz-proxy; ask an administrator to
+grant this user or one of these groups access.
+```
+
+Naming the identity is the point: it distinguishes "authentication is not
+reaching the proxy" from "this subject has nothing mapped to it", and it hands
+an admin the exact user or group to add. An empty group list in that message is
+itself a strong hint that the authenticator is not passing groups.
+
+Sent **once per channel**, since the Status Center does not deduplicate. Counted
+by `hubble_authz_empty_scope_notifications_total` — a rising rate means people
+are reaching Hubble with nothing mapped to them, which is worth knowing before
+they open a ticket. It fires only when the scope is genuinely empty, never
+because one batch of namespaces happened to match none.
+
+Set `proxy.notifyEmptyScope=false` to restore the silent behaviour. It depends
+on hubble-ui rendering `ui.NoPermission`, which is internal to hubble-ui.
+
+If you need more, `--log-level=debug` separates the two underlying causes in one
+line:
 
 ```console
 level=DEBUG msg="request authorized" route=control-stream user=bob@example.com \

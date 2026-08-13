@@ -37,6 +37,11 @@ type Proxy struct {
 	headers     identityHeaders
 	log         *slog.Logger
 	maxResponse int64
+	// notifyEmptyScope turns the "you can see nothing" notice on. It is a flag
+	// because it depends on hubble-ui rendering ui.NoPermission, which is
+	// internal and could change; turning it off restores the silent behaviour
+	// without a rollback.
+	notifyEmptyScope bool
 }
 
 type ctxKey int
@@ -53,24 +58,30 @@ const reqInfoCtxKey ctxKey = iota
 type reqInfo struct {
 	filtered bool
 	scope    Scope
+	// id is carried so the empty-scope notification can name the identity the
+	// proxy actually saw. That is the whole diagnostic value of it: "no
+	// namespaces are visible to bob@example.com" tells an admin which subject to
+	// map, where "you see nothing" starts a support thread.
+	id Identity
 }
 
 // errResponseTooLarge is a limit being hit, not an upstream fault, and is
 // classified separately so the two can be told apart in metrics.
 var errResponseTooLarge = errors.New("backend response exceeds --max-response-bytes")
 
-func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefix string, requireBoth bool, identityPrefix string, maxResponse int64, logger *slog.Logger) *Proxy {
+func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefix string, requireBoth bool, identityPrefix string, maxResponse int64, notifyEmptyScope bool, logger *slog.Logger) *Proxy {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	p := &Proxy{
-		authz:       authz,
-		services:    reg,
-		requireBoth: requireBoth,
-		apiPrefix:   apiPrefix,
-		headers:     newIdentityHeaders(identityPrefix),
-		log:         logger,
-		maxResponse: maxResponse,
+		authz:            authz,
+		services:         reg,
+		requireBoth:      requireBoth,
+		apiPrefix:        apiPrefix,
+		headers:          newIdentityHeaders(identityPrefix),
+		log:              logger,
+		maxResponse:      maxResponse,
+		notifyEmptyScope: notifyEmptyScope,
 	}
 	p.rp = &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
@@ -169,7 +180,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"namespaces", len(scope.Namespaces))
 
 	requestsTotal.WithLabelValues(route, outcomeFiltered).Inc()
-	ctx := context.WithValue(r.Context(), reqInfoCtxKey, reqInfo{filtered: true, scope: scope})
+	ctx := context.WithValue(r.Context(), reqInfoCtxKey, reqInfo{filtered: true, scope: scope, id: id})
 	p.rp.ServeHTTP(w, r.WithContext(ctx))
 }
 
@@ -230,7 +241,7 @@ func (p *Proxy) filterResponse(resp *http.Response) error {
 	route := msg.GetMeta().GetRouteName()
 	channelID := msg.GetMeta().GetChannelId()
 
-	filtered, err := p.filterBody(route, channelID, msg.GetBody().GetContent(), scope)
+	filtered, err := p.filterBody(route, channelID, msg.GetBody().GetContent(), scope, info.id)
 	if err != nil {
 		return err
 	}

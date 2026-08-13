@@ -53,8 +53,9 @@ func main() {
 		shutdownGrace = flag.Duration("shutdown-timeout", 20*time.Second, "how long to let in-flight requests finish after SIGTERM")
 		maxResponse   = flag.Int64("max-response-bytes", 8<<20,
 			"largest backend response the proxy will buffer to filter. The whole body is held in memory, so peak usage is roughly this times the number of concurrent callers; oversized responses are refused, never forwarded unfiltered")
-		logLevel  = flag.String("log-level", "info", "debug | info | warn | error. debug logs the identity and resolved scope of every request")
-		logFormat = flag.String("log-format", "text", "text | json")
+		notifyEmpty = flag.Bool("notify-empty-scope", true, "tell a caller with no visible namespaces why the UI is empty, via the NoPermission notification hubble-ui renders in its Status Center")
+		logLevel    = flag.String("log-level", "info", "debug | info | warn | error. debug logs the identity and resolved scope of every request")
+		logFormat   = flag.String("log-format", "text", "text | json")
 	)
 	flag.Parse()
 
@@ -102,7 +103,7 @@ func main() {
 	reg.maxChannels = *maxChannels
 	go reg.RunSweeper(ctx)
 
-	proxy := NewProxy(backend, authz, reg, *apiPrefix, *reqBoth, *identityPfx, *maxResponse, logger)
+	proxy := NewProxy(backend, authz, reg, *apiPrefix, *reqBoth, *identityPfx, *maxResponse, *notifyEmpty, logger)
 
 	srv := &http.Server{
 		Addr:              *listen,
@@ -134,6 +135,7 @@ func main() {
 		"identityHeaders", *identityPfx+"-*",
 		"maxResponseBytes", *maxResponse,
 		"maxChannels", *maxChannels,
+		"notifyEmptyScope", *notifyEmpty,
 		"logLevel", *logLevel)
 
 	serveErr := make(chan error, 1)

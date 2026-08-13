@@ -227,6 +227,19 @@ proxy:
   # unfiltered, and are counted as outcome="response_too_large".
   maxResponseBytes: 8388608  # 8 MiB
 
+  # -- Tell a caller with no visible namespaces why the UI is empty.
+  #
+  # Without it they get a blank namespace picker and no explanation, which is
+  # indistinguishable from Hubble being broken and is the most common support
+  # report this proxy produces. With it, hubble-ui shows a warning in its Status
+  # Center naming the identity the proxy saw — which is exactly what an admin
+  # needs in order to map them.
+  #
+  # It relies on hubble-ui rendering ui.NoPermission, which is internal to
+  # hubble-ui. Turn it off if a future release stops doing so; nothing else
+  # changes.
+  notifyEmptyScope: true
+
   # -- debug | info | warn | error
   #
   # debug logs the identity and resolved scope of every request, which is the
