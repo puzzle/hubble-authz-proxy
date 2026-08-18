@@ -39,6 +39,26 @@ const (
 
 var mappingReloadResults = []string{reloadChanged, reloadUnchanged, reloadError}
 
+// Resource kinds whose change can invalidate a cached scope in rbac mode. Same
+// discipline again: the watch handlers and the pre-initialisation below both
+// reference these, so a kind cannot be reported without also being exported at
+// zero.
+const (
+	resourceNamespace          = "namespace"
+	resourceRole               = "role"
+	resourceClusterRole        = "clusterrole"
+	resourceRoleBinding        = "rolebinding"
+	resourceClusterRoleBinding = "clusterrolebinding"
+)
+
+var invalidationResources = []string{
+	resourceNamespace,
+	resourceRole,
+	resourceClusterRole,
+	resourceRoleBinding,
+	resourceClusterRoleBinding,
+}
+
 // requestOutcomes is every outcome reported against a route.
 var requestOutcomes = []string{
 	outcomeFiltered,
@@ -89,6 +109,21 @@ var (
 		Name: "hubble_authz_subjectaccessreviews_total",
 		Help: "SubjectAccessReviews issued against the API server.",
 	})
+
+	// A plain Gauge: exports at zero on registration with no
+	// initLabelCombinations entry needed, same reasoning as trackedChannels.
+	rbacWatchActive = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "hubble_authz_rbac_watch_active",
+		Help: "1 if RBAC-change watch-driven cache invalidation is running, 0 if degraded to " +
+			"TTL-only (missing watch permission, apiserver unreachable, sync timeout, or -rbac-watch=false).",
+	})
+
+	rbacCacheInvalidationsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "hubble_authz_rbac_cache_invalidations_total",
+		Help: "Scope cache entries evicted by watch-driven invalidation, by the resource kind whose " +
+			"change triggered it. A rising rate is the watch shrinking staleness below -rbac-ttl; " +
+			"zero forever alongside rbac_watch_active=0 means it's degraded, not idle.",
+	}, []string{"resource"})
 
 	trackedChannels = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "hubble_authz_tracked_channels",
@@ -148,6 +183,8 @@ func metricsRegistry() *prometheus.Registry {
 		scopeResolutionDuration,
 		scopeCacheTotal,
 		subjectAccessReviewsTotal,
+		rbacWatchActive,
+		rbacCacheInvalidationsTotal,
 		trackedChannels,
 		channelEvictionsTotal,
 		emptyScopeNotifications,
@@ -196,6 +233,10 @@ func initLabelCombinations() {
 
 	for _, result := range mappingReloadResults {
 		mappingReloads.WithLabelValues(result)
+	}
+
+	for _, resource := range invalidationResources {
+		rbacCacheInvalidationsTotal.WithLabelValues(resource)
 	}
 }
 

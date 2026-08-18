@@ -447,6 +447,28 @@ Watch `hubble_authz_subjectaccessreviews_total` and
 `hubble_authz_scope_cache_total{result="miss"}` to see what it actually costs
 you before tuning further.
 
+**Revocation latency.** `authz.watchRBAC` (on by default) watches Namespaces,
+Roles, ClusterRoles, RoleBindings and ClusterRoleBindings and evicts a caller's
+cached scope as soon as a change naming them is observed, instead of waiting out
+`authz.cacheTTL`. This shrinks the *average* staleness window rather than
+capping the worst case — the TTL still backstops whatever a watch misses (a
+relist gap, a restart mid-change) — which is what makes raising
+`authz.cacheTTL` for the sizing reason above cheaper than it looks.
+
+It costs `list`/`watch` on those four resources plus `watch` on namespaces,
+granted by the chart only while `authz.watchRBAC` is set, so turning the feature
+off also drops the permissions. Missing them is never fatal: the proxy logs one
+warning, stops the watches and falls back to TTL-only, visible as
+`hubble_authz_rbac_watch_active` sitting at `0`. That is what an image upgraded
+ahead of the chart's RBAC rules does, so a version skew degrades quietly instead
+of failing.
+
+What the informers cache is trimmed to what invalidation actually reads (a
+binding's `roleRef` and `subjects`, a role's name, a namespace's name), so
+`.rules`, `managedFields` and `last-applied-configuration` never accumulate in
+memory. Clusters that generate RBAC per project or per namespace — Rancher among
+them — are where that matters.
+
 Note that `rbac` mode grants what `list pods` grants. If a team can read pods in
 a namespace they can see its flows — usually what you want, but check it matches
 your intent before assuming it is stricter than a static mapping.
@@ -475,6 +497,7 @@ never a match on its own.
 | `--authz-config` | `/etc/hubble-authz/mapping.yaml` | Static mapping file |
 | `--authz-config-reload` | `30s` | How often the mapping file is re-read; `0` disables and makes changes need a restart |
 | `--rbac-ttl` | `60s` | Cache TTL for a resolved namespace set |
+| `--rbac-watch` | `true` | Watch Namespaces/Roles/ClusterRoles/RoleBindings/ClusterRoleBindings to evict a cached scope sooner than `--rbac-ttl` when access changes; falls back to TTL-only if the ServiceAccount lacks watch permission |
 | `--channel-ttl` | `10m` | How long per-channel service-map state survives an idle client |
 | `--max-channels` | `1024` | Cap on channels holding service-map state; past it the least recently used is dropped. `0` disables |
 | `--notify-empty-scope` | `true` | Tell a caller with no visible namespaces why the UI is empty, instead of leaving it blank |
@@ -504,6 +527,8 @@ rule, `networkPolicy.metricsIngressFrom`; leaving it empty blocks Prometheus.
 | `hubble_authz_scope_resolution_seconds` | histogram | `mode` |
 | `hubble_authz_scope_cache_total` | counter | `result` |
 | `hubble_authz_subjectaccessreviews_total` | counter | — |
+| `hubble_authz_rbac_watch_active` | gauge | — |
+| `hubble_authz_rbac_cache_invalidations_total` | counter | `resource` |
 | `hubble_authz_tracked_channels` | gauge | — |
 | `hubble_authz_channel_evictions_total` | counter | — |
 | `hubble_authz_empty_scope_notifications_total` | counter | — |

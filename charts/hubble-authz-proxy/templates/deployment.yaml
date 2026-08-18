@@ -66,6 +66,7 @@ spec:
             {{- else }}
             - --rbac-ttl={{ .Values.authz.cacheTTL }}
             - --rbac-concurrency={{ .Values.authz.concurrency }}
+            - --rbac-watch={{ .Values.authz.watchRBAC }}
             {{- end }}
             {{- with .Values.extraArgs }}
             {{- toYaml . | nindent 12 }}

@@ -292,6 +292,20 @@ authz:
   # namespaces/concurrency round trips.
   concurrency: 16
 
+  # -- Watch RBAC for changes and drop a caller's cached scope early (mode=rbac).
+  #
+  # Without this, revoking access takes up to cacheTTL to apply, which is the
+  # direction that matters and the reason not to raise cacheTTL freely. With it,
+  # a change to a Role, ClusterRole, RoleBinding or ClusterRoleBinding naming the
+  # caller evicts their entry, so the next request re-resolves against current
+  # RBAC. cacheTTL still backstops whatever a watch misses, so this shrinks the
+  # average staleness window rather than capping the worst case.
+  #
+  # Costs list/watch on those four resources plus watch on namespaces, granted
+  # below when rbac.create is set. Turning this off drops both the watches and
+  # those permissions, leaving cacheTTL as the only thing that expires an entry.
+  watchRBAC: true
+
   # -- How often the proxy re-reads the mapping file (mode=static).
   #
   # kubelet updates a mounted ConfigMap in place, so without this an edit
