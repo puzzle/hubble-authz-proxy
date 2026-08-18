@@ -1,5 +1,9 @@
 {{- $needsSAR := and .Values.rbac.create (eq .Values.authz.mode "rbac") -}}
 {{- $needsUI := and .Values.hubbleUI.enabled .Values.hubbleUI.rbac.create -}}
+{{- /* Only granted when the proxy will actually use the watches: turning
+       authz.watchRBAC off should not leave the ServiceAccount holding
+       cluster-wide read on RBAC it never reads. */}}
+{{- $needsRBACWatch := and $needsSAR .Values.authz.watchRBAC -}}
 {{- if .Values.serviceAccount.create }}
 apiVersion: v1
 kind: ServiceAccount
@@ -48,10 +52,24 @@ rules:
   {{- end }}
   {{- if $needsSAR }}
   {{- if not $needsUI }}
-  # The rbac authorizer lists namespaces to know what to ask about.
+  # The rbac authorizer lists namespaces to know what to ask about{{ if $needsRBACWatch }}, and
+  # watches them to invalidate a caller's cached scope when one is deleted{{ end }}.
   - apiGroups: [""]
     resources: ["namespaces"]
-    verbs: ["list"]
+    verbs: ["list"{{ if $needsRBACWatch }}, "watch"{{ end }}]
+  {{- end }}
+  {{- if $needsRBACWatch }}
+  # Watched (not just listed) so RBAC changes can invalidate a caller's
+  # cached scope sooner than -rbac-ttl. Missing this rule only degrades to
+  # TTL-only invalidation — it is never fatal (see RunWatch in
+  # authz_rbac_watch.go).
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources:
+      - roles
+      - clusterroles
+      - rolebindings
+      - clusterrolebindings
+    verbs: ["list", "watch"]
   {{- end }}
   # Asking on the caller's behalf, so the proxy never holds their credentials.
   - apiGroups: ["authorization.k8s.io"]

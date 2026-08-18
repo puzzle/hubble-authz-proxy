@@ -12,6 +12,7 @@ import (
 	authzv1 "k8s.io/api/authorization/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	rbacv1listers "k8s.io/client-go/listers/rbac/v1"
 	"k8s.io/client-go/rest"
 )
 
@@ -39,7 +40,11 @@ const (
 // every distinct user/group combination that reaches the proxy creates an entry.
 //
 // The proxy's ServiceAccount needs: create on subjectaccessreviews, list on
-// namespaces.
+// namespaces. RunWatch (authz_rbac_watch.go) additionally wants watch on
+// namespaces and list/watch on roles/clusterroles/rolebindings/
+// clusterrolebindings, to evict a cached entry sooner than ttl when access
+// changes — but that is a latency optimization, not a requirement: without it
+// RunWatch logs a warning and the authorizer keeps working on ttl alone.
 type RBACAuthorizer struct {
 	kc          kubernetes.Interface
 	ttl         time.Duration
@@ -51,11 +56,21 @@ type RBACAuthorizer struct {
 
 	mu    sync.Mutex
 	cache map[string]cachedScope
+
+	// Set once by RunWatch, before factory.Start() spawns the goroutines that
+	// could invoke handlers referencing them; ordinary happens-before via the
+	// go statement covers it, since AllowedNamespaces/resolve never touch them.
+	roleBindingLister        rbacv1listers.RoleBindingLister
+	clusterRoleBindingLister rbacv1listers.ClusterRoleBindingLister
 }
 
 type cachedScope struct {
 	scope   Scope
 	expires time.Time
+	// id is the identity this entry was resolved for, retained so watch-driven
+	// invalidation (authz_rbac_watch.go) can match cluster RBAC subjects
+	// (User/Group) without re-parsing the opaque cacheKey string.
+	id Identity
 }
 
 func NewRBACAuthorizer(ttl time.Duration, concurrency int) (*RBACAuthorizer, error) {
@@ -111,7 +126,7 @@ func (a *RBACAuthorizer) AllowedNamespaces(ctx context.Context, id Identity) (Sc
 		if err != nil {
 			return Scope{}, err
 		}
-		a.store(key, scope)
+		a.store(key, scope, id)
 		return scope, nil
 	})
 	if err != nil {
@@ -203,7 +218,7 @@ func (a *RBACAuthorizer) cached(key string) (Scope, bool) {
 	return c.scope, true
 }
 
-func (a *RBACAuthorizer) store(key string, scope Scope) {
+func (a *RBACAuthorizer) store(key string, scope Scope, id Identity) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -218,7 +233,7 @@ func (a *RBACAuthorizer) store(key string, scope Scope) {
 			delete(a.cache, k)
 		}
 	}
-	a.cache[key] = cachedScope{scope: scope, expires: a.now().Add(a.ttl)}
+	a.cache[key] = cachedScope{scope: scope, expires: a.now().Add(a.ttl), id: id}
 }
 
 func (a *RBACAuthorizer) evictExpiredLocked() {

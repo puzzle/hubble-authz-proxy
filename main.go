@@ -43,11 +43,15 @@ func main() {
 		apiPrefix     = flag.String("api-prefix", "/api", "path prefix carrying backend routes; everything else is passed through")
 		identityPfx   = flag.String("identity-header-prefix", AuthRequestPrefix,
 			"header family carrying the caller identity: X-Auth-Request (nginx auth_request / Traefik forwardAuth) or X-Forwarded (oauth2-proxy as the reverse proxy)")
-		mode          = flag.String("authz", "static", "authorization backend: static | rbac")
-		mapFile       = flag.String("authz-config", "/etc/hubble-authz/mapping.yaml", "static mode: group/user -> namespace mapping")
-		mapReload     = flag.Duration("authz-config-reload", 30*time.Second, "static mode: how often to re-read the mapping file; 0 disables and makes changes need a pod restart")
-		rbacTTL       = flag.Duration("rbac-ttl", 60*time.Second, "rbac mode: cache TTL for a caller's resolved namespace set")
-		rbacWorkers   = flag.Int("rbac-concurrency", 16, "rbac mode: SubjectAccessReviews issued in parallel per resolution")
+		mode        = flag.String("authz", "static", "authorization backend: static | rbac")
+		mapFile     = flag.String("authz-config", "/etc/hubble-authz/mapping.yaml", "static mode: group/user -> namespace mapping")
+		mapReload   = flag.Duration("authz-config-reload", 30*time.Second, "static mode: how often to re-read the mapping file; 0 disables and makes changes need a pod restart")
+		rbacTTL     = flag.Duration("rbac-ttl", 60*time.Second, "rbac mode: cache TTL for a caller's resolved namespace set")
+		rbacWorkers = flag.Int("rbac-concurrency", 16, "rbac mode: SubjectAccessReviews issued in parallel per resolution")
+		rbacWatch   = flag.Bool("rbac-watch", true,
+			"rbac mode: watch Namespaces/Roles/ClusterRoles/RoleBindings/ClusterRoleBindings to evict a "+
+				"caller's cached scope sooner than -rbac-ttl when access changes; falls back to TTL-only "+
+				"if the ServiceAccount lacks watch permission (never fatal)")
 		channelTTL    = flag.Duration("channel-ttl", 10*time.Minute, "how long to keep per-channel service-map state after a client goes idle")
 		maxChannels   = flag.Int("max-channels", defaultMaxChannels, "cap on client channels holding service-map state; the least recently used is dropped past this")
 		reqBoth       = flag.Bool("require-both-endpoints", false, "only show traffic when BOTH endpoints are in allowed namespaces (stricter)")
@@ -94,6 +98,9 @@ func main() {
 		rbacAuthz, err = NewRBACAuthorizer(*rbacTTL, *rbacWorkers)
 		if err == nil {
 			go rbacAuthz.RunSweeper(ctx)
+			if *rbacWatch {
+				go rbacAuthz.RunWatch(ctx, logger)
+			}
 			authz = rbacAuthz
 		}
 	default:
@@ -143,6 +150,7 @@ func main() {
 		"maxResponseBytes", *maxResponse,
 		"maxChannels", *maxChannels,
 		"notifyEmptyScope", *notifyEmpty,
+		"rbacWatch", *rbacWatch,
 		"logLevel", *logLevel)
 
 	serveErr := make(chan error, 1)
