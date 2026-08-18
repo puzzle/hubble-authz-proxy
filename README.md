@@ -736,6 +736,19 @@ therefore load-bearing — bump it in lockstep with the ui-backend image you
 deploy, and let the compiler tell you what changed. Unknown routes are refused
 rather than forwarded, so a mismatch fails loudly.
 
+That loud failure only covers a **new route or a new `Event` kind** — both are
+Go oneofs, so the proxy fails closed on either without needing to know about
+them in advance (`filterBody`'s default case, `eventVisible`'s default case).
+It does **not** cover a **new field added to an already-recognised message
+type**. `eventVisible` decides keep-or-drop for the whole `*uipb.Event` by
+inspecting only the fields it already knows about (a namespace name, a service
+ID, ...); once kept, the message is marshalled whole, so any field a newer
+proto version adds rides along unexamined. The compiler will not catch this —
+an added field, unlike a renamed or removed one, does not break the build.
+When bumping the pin, diff the proto for new fields on `NamespaceState`,
+`ServiceState`, `ServiceLinkState`, `Flow` and `Flows` specifically, not just
+for new message kinds.
+
 **The Hubble CLI is not covered.** `hubble observe` talks to relay directly and
 authenticates as a machine, so no user identity ever reaches it. Restrict relay
 by NetworkPolicy if that matters.
