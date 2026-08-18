@@ -285,6 +285,87 @@ That covers spoofing through the front door. It does not cover reaching the prox
 directly, which is what `networkPolicy.ingressFrom` is for — see
 [Security model](#security-model).
 
+#### Using Rancher as the OIDC provider
+
+Rancher can act as its own OIDC provider ([docs][rancher-oidc]), issuing tokens
+for whatever login Rancher itself is federated with (AD/LDAP, SAML, Keycloak,
+GitHub, Entra/Azure AD, …) instead of pointing oauth2-proxy at that upstream
+IdP directly.
+
+**1. Register an `OIDCClient` in Rancher.** The `groups` scope is **not** one of
+the defaults (`openid`, `profile`, `offline_access`) — it must be listed
+explicitly or Rancher rejects it:
+
+```yaml
+apiVersion: management.cattle.io/v3
+kind: OIDCClient
+metadata:
+  name: hubble-ui
+spec:
+  description: "hubble-authz-proxy / oauth2-proxy"
+  redirectUris:
+    - "https://oauth2-proxy.example.com/oauth2/callback"
+  scopes:
+    - openid
+    - profile
+    - groups
+  tokenExpirationSeconds: 3600
+  refreshTokenExpirationSeconds: 86400
+```
+
+Rancher generates the client ID/secret and stores them in a Secret in the
+`cattle-oidc-client-secrets` namespace — read them from there for the
+oauth2-proxy values below.
+
+**2. Point oauth2-proxy at Rancher's issuer:**
+
+```yaml
+# oauth2-proxy-values.yaml
+config:
+  clientID: "<from cattle-oidc-client-secrets>"
+  clientSecret: "<from cattle-oidc-client-secrets>"
+  cookieSecret: "<generated>"
+
+extraArgs:
+  provider: oidc
+  oidc-issuer-url: https://rancher.example.com/oidc
+  set-xauthrequest: "true"
+  scope: "openid profile groups"     # must match OIDCClient.spec.scopes
+  email-domain: "*"
+  reverse-proxy: "true"
+  upstream: "static://202"
+  cookie-domain: ".example.com"
+  whitelist-domain: ".example.com"
+```
+
+Rancher has no `email` claim/scope, so oauth2-proxy's `X-Auth-Request-Email`
+header comes back empty — key `mapping.yaml` off `X-Auth-Request-User` (the
+Rancher `sub`, e.g. `u-cuk6luiram`) or off groups instead.
+
+**3. Expect raw principal strings in `groups`, not friendly names.** Rancher's
+OIDC provider only strips a `local://` prefix; whatever prefix the underlying
+auth provider uses passes straight through — `activedirectory_group://` for
+AD/LDAP, `openldap_group://`, `keycloakoidc_group://`, `github_team://`,
+`azuread_group://`, `saml_group://`, and so on. The `groups` claim carries the
+same values `kubectl auth whoami` shows, e.g. for an AD-backed login:
+
+```text
+activedirectory_group://CN=GA_LLV_Rancher_Admin,OU=Applicationgroups GA,OU=Groups,OU=_LLV,DC=gv,DC=li
+```
+
+`groupToNamespaces` in `mapping.yaml` has to key on those full strings — a
+group rename or, for AD/LDAP, an OU reorg, will change them and silently break
+the mapping:
+
+```yaml
+groupToNamespaces:
+  "activedirectory_group://CN=GA_LLV_Rancher_Admin,OU=Applicationgroups GA,OU=Groups,OU=_LLV,DC=gv,DC=li":
+    - payments
+    - payments-staging
+```
+
+[rancher-oidc]: https://ranchermanager.docs.rancher.com/how-to-guides/advanced-user-guides/configure-oidc-provider
+
 ---
 
 ## Configuration
