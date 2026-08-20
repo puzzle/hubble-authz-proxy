@@ -52,7 +52,7 @@ func TestMetricLabelsAreBounded(t *testing.T) {
 }
 
 func TestMetricsHandler(t *testing.T) {
-	srv := httptest.NewServer(metricsHandler(metricsRegistry()))
+	srv := httptest.NewServer(metricsHandler(metricsRegistry("test", knownRoutes)))
 	t.Cleanup(srv.Close)
 
 	t.Run("metrics", func(t *testing.T) {
@@ -100,7 +100,7 @@ func TestMetricsHandler(t *testing.T) {
 // exact moment you would have wanted the alert to already exist. client_gone
 // and upstream_error shipped that way, which is what this guards.
 func TestEveryOutcomeIsPreInitialised(t *testing.T) {
-	reg := metricsRegistry()
+	reg := metricsRegistry("test", knownRoutes)
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatal(err)

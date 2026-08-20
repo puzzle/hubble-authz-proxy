@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
 	"strings"
 
@@ -95,7 +96,7 @@ func (p *Proxy) filterControlStream(channelID string, body []byte, scope Scope, 
 		p.services.markEmptyScopeNotified(channelID) {
 		emptyScopeNotifications.Inc()
 		p.log.Info("caller has no visible namespaces; sending them a NoPermission notice",
-			"user", cmpOr(id.Email, id.User), "groups", id.Groups)
+			"user", cmp.Or(id.Email, id.User), "groups", id.Groups)
 		return proto.Marshal(noPermissionResponse(id))
 	}
 
@@ -114,7 +115,7 @@ func (p *Proxy) filterControlStream(channelID string, body []byte, scope Scope, 
 // So resource has to complete that sentence, and error is the only place an
 // actionable explanation fits.
 func noPermissionResponse(id Identity) *uipb.GetControlStreamResponse {
-	who := cmpOr(id.Email, id.User)
+	who := cmp.Or(id.Email, id.User)
 	if who == "" {
 		who = "your account"
 	}

@@ -110,7 +110,7 @@ func main() {
 		logger.Error("cannot start authorizer", "mode", *mode, "err", err)
 		os.Exit(1)
 	}
-	authz = instrumentedAuthorizer{next: authz, mode: *mode}
+	authz = Instrumented(authz, *mode)
 
 	reg := newServiceRegistry(*channelTTL)
 	reg.maxChannels = *maxChannels
@@ -128,7 +128,7 @@ func main() {
 	if *metricsListen != "" {
 		metricsSrv = &http.Server{
 			Addr:              *metricsListen,
-			Handler:           metricsHandler(metricsRegistry()),
+			Handler:           metricsHandler(metricsRegistry(version, knownRoutes)),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 		go func() {
