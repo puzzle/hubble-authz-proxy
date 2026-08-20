@@ -19,7 +19,7 @@
 replicaCount: 1
 
 image:
-  repository: ghcr.io/splattner/hubble-authz-proxy
+  repository: ghcr.io/puzzle/hubble-authz-proxy
   pullPolicy: IfNotPresent
   # Defaults to v<appVersion>, matching the published tags.
   tag: ""

@@ -33,7 +33,7 @@ ARG OCI_CREATED=unknown
 
 LABEL org.opencontainers.image.title="hubble-authz-proxy" \
       org.opencontainers.image.description="Namespace-scoped authorization proxy for the Hubble UI" \
-      org.opencontainers.image.source="https://github.com/splattner/hubble-authz-proxy" \
+      org.opencontainers.image.source="https://github.com/puzzle/hubble-authz-proxy" \
       org.opencontainers.image.licenses="Apache-2.0" \
       org.opencontainers.image.version="${OCI_VERSION}" \
       org.opencontainers.image.revision="${OCI_REVISION}" \
