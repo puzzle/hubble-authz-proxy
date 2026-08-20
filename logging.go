@@ -79,11 +79,3 @@ func (h identityHeaders) otherFamilyIn(r *http.Request) []string {
 	}
 	return found
 }
-
-// cmpOr returns the first non-empty string.
-func cmpOr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
-}

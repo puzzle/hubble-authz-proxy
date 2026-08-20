@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -174,7 +175,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// the identity that actually arrived and what it resolved to.
 	p.log.Debug("request authorized",
 		"route", route,
-		"user", cmpOr(id.Email, id.User),
+		"user", cmp.Or(id.Email, id.User),
 		"groups", id.Groups,
 		"unrestricted", scope.All,
 		"namespaces", len(scope.Namespaces))

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -172,7 +171,14 @@ var (
 
 // metricsRegistry is process-local rather than the default registry so tests can
 // exercise instrumented code without colliding on duplicate registration.
-func metricsRegistry() *prometheus.Registry {
+//
+// version and routes are parameters rather than package globals read from here
+// so that this file depends on nothing else in the tree: version belongs to the
+// entry point (it is stamped by -ldflags), and the route names belong to the
+// component that dispatches on them. Both are label vocabulary as far as
+// metrics is concerned, and initLabelCombinations is the only reason it needs
+// to know them at all.
+func metricsRegistry(version string, routes []string) *prometheus.Registry {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(
 		collectors.NewGoCollector(),
@@ -192,7 +198,7 @@ func metricsRegistry() *prometheus.Registry {
 		mappingLastReload,
 		buildInfo,
 	)
-	initLabelCombinations()
+	initLabelCombinations(routes)
 	// Answers "which version is actually running" from Prometheus alone, which
 	// is otherwise only visible by inspecting the pod.
 	buildInfo.WithLabelValues(version).Set(1)
@@ -205,8 +211,8 @@ func metricsRegistry() *prometheus.Registry {
 // this a rate() over hubble_authz_events_total{decision="dropped"} returns no
 // data rather than 0 until something is actually dropped — which reads as "the
 // filter is not running" exactly when it is running correctly.
-func initLabelCombinations() {
-	for _, route := range knownRoutes {
+func initLabelCombinations(routes []string) {
+	for _, route := range routes {
 		for _, outcome := range requestOutcomes {
 			requestsTotal.WithLabelValues(route, outcome)
 		}
@@ -248,16 +254,4 @@ func metricsHandler(reg *prometheus.Registry) http.Handler {
 		_, _ = w.Write([]byte("ok\n"))
 	})
 	return mux
-}
-
-// instrumentedAuthorizer times scope resolution regardless of the backing mode.
-type instrumentedAuthorizer struct {
-	next Authorizer
-	mode string
-}
-
-func (a instrumentedAuthorizer) AllowedNamespaces(ctx context.Context, id Identity) (Scope, error) {
-	timer := prometheus.NewTimer(scopeResolutionDuration.WithLabelValues(a.mode))
-	defer timer.ObserveDuration()
-	return a.next.AllowedNamespaces(ctx, id)
 }

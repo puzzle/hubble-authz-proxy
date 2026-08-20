@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/yaml"
 )
 
@@ -21,6 +22,28 @@ type Scope struct {
 
 type Authorizer interface {
 	AllowedNamespaces(ctx context.Context, id Identity) (Scope, error)
+}
+
+// instrumentedAuthorizer times scope resolution regardless of the backing mode.
+//
+// It lives here, with the interface it decorates, rather than alongside the
+// collector it writes to: an authorizer wrapping an authorizer is an authz
+// concern, and putting it here is what lets the metrics definitions depend on
+// nothing else in the tree.
+type instrumentedAuthorizer struct {
+	next Authorizer
+	mode string
+}
+
+// Instrumented wraps next so every resolution is timed under mode.
+func Instrumented(next Authorizer, mode string) Authorizer {
+	return instrumentedAuthorizer{next: next, mode: mode}
+}
+
+func (a instrumentedAuthorizer) AllowedNamespaces(ctx context.Context, id Identity) (Scope, error) {
+	timer := prometheus.NewTimer(scopeResolutionDuration.WithLabelValues(a.mode))
+	defer timer.ObserveDuration()
+	return a.next.AllowedNamespaces(ctx, id)
 }
 
 // --- static mapping --------------------------------------------------------
