@@ -24,7 +24,7 @@ require (
 	github.com/cilium/hubble-ui/backend v0.0.0-20260609084320-1940732cd8e5
 	github.com/prometheus/client_golang v1.24.1
 	golang.org/x/sync v0.22.0
-	google.golang.org/protobuf v1.36.12-0.20260120151049-f2248ac996af
+	google.golang.org/protobuf v1.36.12
 )
 
 require (
