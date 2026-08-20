@@ -1,4 +1,6 @@
-package main
+// Package rbac resolves a caller's visible namespaces from real cluster RBAC,
+// asking the API server on their behalf rather than consulting a mapping.
+package rbac
 
 import (
 	"context"
@@ -7,6 +9,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/puzzle/hubble-authz-proxy/internal/authz"
+	"github.com/puzzle/hubble-authz-proxy/internal/identity"
+	"github.com/puzzle/hubble-authz-proxy/internal/metrics"
 	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 	authzv1 "k8s.io/api/authorization/v1"
@@ -16,13 +21,13 @@ import (
 	"k8s.io/client-go/rest"
 )
 
-// Defaults for RBACAuthorizer tuning.
+// Defaults for Authorizer tuning.
 const (
 	defaultSARConcurrency = 16
 	defaultMaxCacheSize   = 2048
 )
 
-// RBACAuthorizer derives the visible namespace set from real cluster RBAC: for
+// Authorizer derives the visible namespace set from real cluster RBAC: for
 // each namespace it asks the API server, on behalf of the caller, whether they
 // may "list pods". This keeps the Hubble view in lockstep with kubectl access
 // and needs no mapping to maintain.
@@ -40,12 +45,12 @@ const (
 // every distinct user/group combination that reaches the proxy creates an entry.
 //
 // The proxy's ServiceAccount needs: create on subjectaccessreviews, list on
-// namespaces. RunWatch (authz_rbac_watch.go) additionally wants watch on
+// namespaces. RunWatch (watch.go) additionally wants watch on
 // namespaces and list/watch on roles/clusterroles/rolebindings/
 // clusterrolebindings, to evict a cached entry sooner than ttl when access
 // changes — but that is a latency optimization, not a requirement: without it
 // RunWatch logs a warning and the authorizer keeps working on ttl alone.
-type RBACAuthorizer struct {
+type Authorizer struct {
 	kc          kubernetes.Interface
 	ttl         time.Duration
 	concurrency int
@@ -65,15 +70,16 @@ type RBACAuthorizer struct {
 }
 
 type cachedScope struct {
-	scope   Scope
+	scope   authz.Scope
 	expires time.Time
 	// id is the identity this entry was resolved for, retained so watch-driven
-	// invalidation (authz_rbac_watch.go) can match cluster RBAC subjects
+	// invalidation (watch.go) can match cluster RBAC subjects
 	// (User/Group) without re-parsing the opaque cacheKey string.
-	id Identity
+	id identity.Identity
 }
 
-func NewRBACAuthorizer(ttl time.Duration, concurrency int) (*RBACAuthorizer, error) {
+// New builds an Authorizer against the in-cluster API server.
+func New(ttl time.Duration, concurrency int) (*Authorizer, error) {
 	cfg, err := rest.InClusterConfig()
 	if err != nil {
 		return nil, err
@@ -82,15 +88,15 @@ func NewRBACAuthorizer(ttl time.Duration, concurrency int) (*RBACAuthorizer, err
 	if err != nil {
 		return nil, err
 	}
-	a := newRBACAuthorizer(kc, ttl)
+	a := newAuthorizer(kc, ttl)
 	if concurrency > 0 {
 		a.concurrency = concurrency
 	}
 	return a, nil
 }
 
-func newRBACAuthorizer(kc kubernetes.Interface, ttl time.Duration) *RBACAuthorizer {
-	return &RBACAuthorizer{
+func newAuthorizer(kc kubernetes.Interface, ttl time.Duration) *Authorizer {
+	return &Authorizer{
 		kc:          kc,
 		ttl:         ttl,
 		concurrency: defaultSARConcurrency,
@@ -100,14 +106,16 @@ func newRBACAuthorizer(kc kubernetes.Interface, ttl time.Duration) *RBACAuthoriz
 	}
 }
 
-func (a *RBACAuthorizer) AllowedNamespaces(ctx context.Context, id Identity) (Scope, error) {
+// AllowedNamespaces resolves the caller against live cluster RBAC, serving a
+// cached answer when one is still valid.
+func (a *Authorizer) AllowedNamespaces(ctx context.Context, id identity.Identity) (authz.Scope, error) {
 	key := cacheKey(id)
 
 	if scope, ok := a.cached(key); ok {
-		scopeCacheTotal.WithLabelValues("hit").Inc()
+		metrics.ScopeCacheTotal.WithLabelValues("hit").Inc()
 		return scope, nil
 	}
-	scopeCacheTotal.WithLabelValues("miss").Inc()
+	metrics.ScopeCacheTotal.WithLabelValues("miss").Inc()
 
 	// singleflight dedupes concurrent misses for the same identity. Note it does
 	// NOT inherit any one caller's context, so a client disconnecting mid-sweep
@@ -124,18 +132,18 @@ func (a *RBACAuthorizer) AllowedNamespaces(ctx context.Context, id Identity) (Sc
 
 		scope, err := a.resolve(sweepCtx, id)
 		if err != nil {
-			return Scope{}, err
+			return authz.Scope{}, err
 		}
 		a.store(key, scope, id)
 		return scope, nil
 	})
 	if err != nil {
-		return Scope{}, err
+		return authz.Scope{}, err
 	}
-	return res.(Scope), nil
+	return res.(authz.Scope), nil
 }
 
-func (a *RBACAuthorizer) resolve(ctx context.Context, id Identity) (Scope, error) {
+func (a *Authorizer) resolve(ctx context.Context, id identity.Identity) (authz.Scope, error) {
 	// Ask the cluster-scoped question first. A caller who may list pods in every
 	// namespace needs no filtering at all, so this collapses the whole sweep into
 	// one review — and on a large cluster the admins are exactly the users who
@@ -146,15 +154,15 @@ func (a *RBACAuthorizer) resolve(ctx context.Context, id Identity) (Scope, error
 	// cached, rather than a snapshot frozen at resolution time.
 	all, err := a.canListPods(ctx, id, metav1.NamespaceAll)
 	if err != nil {
-		return Scope{}, err
+		return authz.Scope{}, err
 	}
 	if all {
-		return Scope{All: true}, nil
+		return authz.Scope{All: true}, nil
 	}
 
 	nsList, err := a.kc.CoreV1().Namespaces().List(ctx, metav1.ListOptions{})
 	if err != nil {
-		return Scope{}, err
+		return authz.Scope{}, err
 	}
 
 	var mu sync.Mutex
@@ -181,12 +189,12 @@ func (a *RBACAuthorizer) resolve(ctx context.Context, id Identity) (Scope, error
 	// like a smaller namespace set, which silently under-shows rather than
 	// erroring, and would then be cached.
 	if err := g.Wait(); err != nil {
-		return Scope{}, err
+		return authz.Scope{}, err
 	}
-	return Scope{Namespaces: allowed}, nil
+	return authz.Scope{Namespaces: allowed}, nil
 }
 
-func (a *RBACAuthorizer) canListPods(ctx context.Context, id Identity, ns string) (bool, error) {
+func (a *Authorizer) canListPods(ctx context.Context, id identity.Identity, ns string) (bool, error) {
 	sar := &authzv1.SubjectAccessReview{
 		Spec: authzv1.SubjectAccessReviewSpec{
 			User:   firstNonEmpty(id.User, id.Email),
@@ -199,7 +207,7 @@ func (a *RBACAuthorizer) canListPods(ctx context.Context, id Identity, ns string
 			},
 		},
 	}
-	subjectAccessReviewsTotal.Inc()
+	metrics.SubjectAccessReviewsTotal.Inc()
 	res, err := a.kc.AuthorizationV1().SubjectAccessReviews().Create(ctx, sar, metav1.CreateOptions{})
 	if err != nil {
 		return false, err
@@ -207,18 +215,18 @@ func (a *RBACAuthorizer) canListPods(ctx context.Context, id Identity, ns string
 	return res.Status.Allowed, nil
 }
 
-func (a *RBACAuthorizer) cached(key string) (Scope, bool) {
+func (a *Authorizer) cached(key string) (authz.Scope, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	c, ok := a.cache[key]
 	if !ok || !a.now().Before(c.expires) {
-		return Scope{}, false
+		return authz.Scope{}, false
 	}
 	return c.scope, true
 }
 
-func (a *RBACAuthorizer) store(key string, scope Scope, id Identity) {
+func (a *Authorizer) store(key string, scope authz.Scope, id identity.Identity) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -236,7 +244,7 @@ func (a *RBACAuthorizer) store(key string, scope Scope, id Identity) {
 	a.cache[key] = cachedScope{scope: scope, expires: a.now().Add(a.ttl), id: id}
 }
 
-func (a *RBACAuthorizer) evictExpiredLocked() {
+func (a *Authorizer) evictExpiredLocked() {
 	now := a.now()
 	for k, c := range a.cache {
 		if !now.Before(c.expires) {
@@ -246,14 +254,14 @@ func (a *RBACAuthorizer) evictExpiredLocked() {
 }
 
 // sweep drops expired entries so idle identities do not pin memory.
-func (a *RBACAuthorizer) sweep() {
+func (a *Authorizer) sweep() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.evictExpiredLocked()
 }
 
 // RunSweeper evicts expired cache entries until ctx is cancelled.
-func (a *RBACAuthorizer) RunSweeper(ctx context.Context) {
+func (a *Authorizer) RunSweeper(ctx context.Context) {
 	t := time.NewTicker(a.ttl)
 	defer t.Stop()
 	for {
@@ -269,7 +277,7 @@ func (a *RBACAuthorizer) RunSweeper(ctx context.Context) {
 // cacheKey identifies a caller. Groups are sorted so that an identity presenting
 // the same groups in a different header order reuses its entry instead of
 // duplicating one (and triggering a fresh SAR sweep).
-func cacheKey(id Identity) string {
+func cacheKey(id identity.Identity) string {
 	groups := append([]string(nil), id.Groups...)
 	slices.Sort(groups)
 	return id.User + "\x00" + id.Email + "\x00" + strings.Join(groups, "\x00")

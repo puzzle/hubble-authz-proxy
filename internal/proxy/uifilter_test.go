@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"fmt"
@@ -8,12 +8,15 @@ import (
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	uipb "github.com/cilium/hubble-ui/backend/proto/ui"
+	"github.com/puzzle/hubble-authz-proxy/internal/authz"
+	"github.com/puzzle/hubble-authz-proxy/internal/identity"
+	"github.com/puzzle/hubble-authz-proxy/internal/registry"
 	"google.golang.org/protobuf/proto"
 )
 
 func testProxy(requireBoth bool) *Proxy {
 	return &Proxy{
-		services:    newServiceRegistry(time.Minute),
+		services:    registry.New(time.Minute, registry.DefaultMaxChannels),
 		requireBoth: requireBoth,
 		// Matches the shipped default, so these tests exercise the real
 		// configuration rather than a quieter one.
@@ -22,12 +25,12 @@ func testProxy(requireBoth bool) *Proxy {
 	}
 }
 
-func scopeOf(ns ...string) Scope {
+func scopeOf(ns ...string) authz.Scope {
 	m := map[string]bool{}
 	for _, n := range ns {
 		m[n] = true
 	}
-	return Scope{Namespaces: m}
+	return authz.Scope{Namespaces: m}
 }
 
 func svcEvent(id, ns string) *uipb.Event {
@@ -50,13 +53,13 @@ func flowEvent(src, dst string) *uipb.Event {
 
 // filterEvents runs a batch through the real marshal/filter/unmarshal path and
 // returns what survived.
-func filterEvents(t *testing.T, p *Proxy, channelID string, scope Scope, events ...*uipb.Event) []*uipb.Event {
+func filterEvents(t *testing.T, p *Proxy, channelID string, scope authz.Scope, events ...*uipb.Event) []*uipb.Event {
 	t.Helper()
 	body, err := proto.Marshal(&uipb.GetEventsResponse{Events: events})
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := p.filterBody(routeServiceMapStre, channelID, body, scope, Identity{})
+	out, err := p.filterBody(routeServiceMapStre, channelID, body, scope, identity.Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +220,7 @@ func TestFilterControlStreamNamespaces(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := p.filterBody(routeControlStream, "ch1", body, scopeOf("payments"), Identity{})
+	out, err := p.filterBody(routeControlStream, "ch1", body, scopeOf("payments"), identity.Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +252,7 @@ func TestFilterControlStreamPassesNotifications(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := p.filterBody(routeControlStream, "ch1", body, scopeOf("payments"), Identity{})
+	out, err := p.filterBody(routeControlStream, "ch1", body, scopeOf("payments"), identity.Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,10 +301,10 @@ func decodeControl(t *testing.T, b []byte) *uipb.GetControlStreamResponse {
 // which is indistinguishable from Hubble being broken.
 func TestEmptyScopeGetsNoPermissionNotice(t *testing.T) {
 	p := testProxy(false)
-	id := Identity{Email: "bob@example.com", Groups: []string{"devs"}}
+	id := identity.Identity{Email: "bob@example.com", Groups: []string{"devs"}}
 
 	out, err := p.filterBody(routeControlStream, "ch1",
-		namespacesBody(t, "payments", "search"), Scope{}, id)
+		namespacesBody(t, "payments", "search"), authz.Scope{}, id)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +331,7 @@ func TestEmptyScopeGetsNoPermissionNotice(t *testing.T) {
 func TestEmptyScopeNoticeIsSentOncePerChannel(t *testing.T) {
 	p := testProxy(false)
 
-	first, err := p.filterBody(routeControlStream, "ch1", namespacesBody(t, "payments"), Scope{}, Identity{})
+	first, err := p.filterBody(routeControlStream, "ch1", namespacesBody(t, "payments"), authz.Scope{}, identity.Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,7 +340,7 @@ func TestEmptyScopeNoticeIsSentOncePerChannel(t *testing.T) {
 	}
 
 	for i := range 3 {
-		again, err := p.filterBody(routeControlStream, "ch1", namespacesBody(t, "payments"), Scope{}, Identity{})
+		again, err := p.filterBody(routeControlStream, "ch1", namespacesBody(t, "payments"), authz.Scope{}, identity.Identity{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -352,7 +355,7 @@ func TestEmptyScopeNoticeIsSentOncePerChannel(t *testing.T) {
 	}
 
 	// A different channel is a different session and must be told.
-	other, err := p.filterBody(routeControlStream, "ch2", namespacesBody(t, "payments"), Scope{}, Identity{})
+	other, err := p.filterBody(routeControlStream, "ch2", namespacesBody(t, "payments"), authz.Scope{}, identity.Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +371,7 @@ func TestNonEmptyScopeNeverGetsTheNotice(t *testing.T) {
 
 	t.Run("batch matches", func(t *testing.T) {
 		out, err := p.filterBody(routeControlStream, "ch1",
-			namespacesBody(t, "payments", "search"), scopeOf("payments"), Identity{})
+			namespacesBody(t, "payments", "search"), scopeOf("payments"), identity.Identity{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -386,7 +389,7 @@ func TestNonEmptyScopeNeverGetsTheNotice(t *testing.T) {
 	// namespaces arrive in a later batch.
 	t.Run("batch matches nothing", func(t *testing.T) {
 		out, err := p.filterBody(routeControlStream, "ch9",
-			namespacesBody(t, "kube-system"), scopeOf("payments"), Identity{})
+			namespacesBody(t, "kube-system"), scopeOf("payments"), identity.Identity{})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -406,7 +409,7 @@ func TestEmptyScopeNoticeCanBeDisabled(t *testing.T) {
 	p := testProxy(false)
 	p.notifyEmptyScope = false
 
-	out, err := p.filterBody(routeControlStream, "ch1", namespacesBody(t, "payments"), Scope{}, Identity{})
+	out, err := p.filterBody(routeControlStream, "ch1", namespacesBody(t, "payments"), authz.Scope{}, identity.Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -422,13 +425,13 @@ func TestEmptyScopeNoticeCanBeDisabled(t *testing.T) {
 // An empty group list is itself a likely cause of an empty scope, so the advice
 // must not point at groups that were never presented.
 func TestEmptyScopeNoticeAdaptsToMissingGroups(t *testing.T) {
-	without := noPermissionResponse(Identity{Email: "bob@example.com"}).
+	without := noPermissionResponse(identity.Identity{Email: "bob@example.com"}).
 		GetNotification().GetNoPermission().GetError()
 	if strings.Contains(without, "these groups") {
 		t.Errorf("points at groups the caller never presented: %q", without)
 	}
 
-	with := noPermissionResponse(Identity{Email: "bob@example.com", Groups: []string{"devs"}}).
+	with := noPermissionResponse(identity.Identity{Email: "bob@example.com", Groups: []string{"devs"}}).
 		GetNotification().GetNoPermission().GetError()
 	if !strings.Contains(with, "these groups") {
 		t.Errorf("does not offer the groups an admin could map: %q", with)
@@ -442,7 +445,7 @@ func TestEmptyScopeNoticeBoundsGroups(t *testing.T) {
 	for i := range many {
 		many[i] = fmt.Sprintf("group-%02d", i)
 	}
-	msg := noPermissionResponse(Identity{Email: "bob@example.com", Groups: many}).
+	msg := noPermissionResponse(identity.Identity{Email: "bob@example.com", Groups: many}).
 		GetNotification().GetNoPermission().GetError()
 
 	if strings.Contains(msg, "group-40") {
@@ -457,7 +460,7 @@ func TestEmptyScopeNoticeBoundsGroups(t *testing.T) {
 // a hubble-ui upgrade that adds one should break loudly rather than leak.
 func TestFilterUnknownRouteIsRefused(t *testing.T) {
 	p := testProxy(false)
-	if _, err := p.filterBody("some-new-route", "ch1", []byte{0x01}, scopeOf("payments"), Identity{}); err == nil {
+	if _, err := p.filterBody("some-new-route", "ch1", []byte{0x01}, scopeOf("payments"), identity.Identity{}); err == nil {
 		t.Error("unknown route was allowed through")
 	}
 }
@@ -466,7 +469,7 @@ func TestFilterEmptyBodyPassesThrough(t *testing.T) {
 	p := testProxy(false)
 	// Poll responses with no data carry an empty body and must survive, or the
 	// client's long-poll loop breaks.
-	got, err := p.filterBody("some-new-route", "ch1", nil, scopeOf("payments"), Identity{})
+	got, err := p.filterBody("some-new-route", "ch1", nil, scopeOf("payments"), identity.Identity{})
 	if err != nil || got != nil {
 		t.Errorf("empty body: got %v, %v", got, err)
 	}

@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	flowpb "github.com/cilium/cilium/api/v1/flow"

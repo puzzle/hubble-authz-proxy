@@ -1,10 +1,11 @@
-package main
+package registry
 
 import (
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/puzzle/hubble-authz-proxy/internal/metrics"
 )
 
 // fixedClock lets the tests drive lastSeen directly, so LRU order is asserted
@@ -14,10 +15,9 @@ type fixedClock struct{ t time.Time }
 func (c *fixedClock) now() time.Time          { return c.t }
 func (c *fixedClock) advance(d time.Duration) { c.t = c.t.Add(d) }
 
-func newTestRegistry(ttl time.Duration, maxChannels int) (*serviceRegistry, *fixedClock) {
+func newTestRegistry(ttl time.Duration, maxChannels int) (*Registry, *fixedClock) {
 	clk := &fixedClock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
-	r := newServiceRegistry(ttl)
-	r.maxChannels = maxChannels
+	r := New(ttl, maxChannels)
 	r.now = clk.now
 	return r, clk
 }
@@ -27,7 +27,7 @@ func TestRegistryCapsChannelCount(t *testing.T) {
 
 	// Distinct, all live: nothing may be reclaimed for free.
 	for _, id := range []string{"a", "b", "c"} {
-		r.remember(id, "svc-1", "ns-1")
+		r.Remember(id, "svc-1", "ns-1")
 		clk.advance(time.Second)
 	}
 	if got := len(r.channels); got != 3 {
@@ -35,7 +35,7 @@ func TestRegistryCapsChannelCount(t *testing.T) {
 	}
 
 	// A fourth must not grow past the cap.
-	r.remember("d", "svc-1", "ns-1")
+	r.Remember("d", "svc-1", "ns-1")
 	if got := len(r.channels); got > 3 {
 		t.Errorf("len(channels) = %d, want <= 3; the cap is not enforced", got)
 	}
@@ -58,18 +58,18 @@ func TestRegistryCapsChannelCount(t *testing.T) {
 func TestRegistryEvictsLeastRecentlyUsedNotOldest(t *testing.T) {
 	r, clk := newTestRegistry(time.Hour, 2)
 
-	r.remember("old", "svc-1", "ns-1")
+	r.Remember("old", "svc-1", "ns-1")
 	clk.advance(time.Second)
-	r.remember("new", "svc-1", "ns-1")
+	r.Remember("new", "svc-1", "ns-1")
 	clk.advance(time.Second)
 
 	// "old" is the oldest by creation but the most recently *used*.
-	if _, ok := r.lookup("old", "svc-1"); !ok {
+	if _, ok := r.Lookup("old", "svc-1"); !ok {
 		t.Fatal("lookup did not find the service it just recorded")
 	}
 	clk.advance(time.Second)
 
-	r.remember("third", "svc-1", "ns-1")
+	r.Remember("third", "svc-1", "ns-1")
 
 	if _, ok := r.channels["old"]; !ok {
 		t.Error("evicted the channel that was just read from; lastSeen is not tracking use")
@@ -84,11 +84,11 @@ func TestRegistryEvictsLeastRecentlyUsedNotOldest(t *testing.T) {
 func TestRegistryPrefersExpiredOverLive(t *testing.T) {
 	r, clk := newTestRegistry(time.Minute, 2)
 
-	r.remember("stale", "svc-1", "ns-1")
+	r.Remember("stale", "svc-1", "ns-1")
 	clk.advance(2 * time.Minute) // past the TTL
-	r.remember("live", "svc-1", "ns-1")
+	r.Remember("live", "svc-1", "ns-1")
 
-	r.remember("fresh", "svc-1", "ns-1")
+	r.Remember("fresh", "svc-1", "ns-1")
 
 	if _, ok := r.channels["stale"]; ok {
 		t.Error("the expired channel survived")
@@ -105,7 +105,7 @@ func TestRegistryZeroMaxChannelsDisablesCap(t *testing.T) {
 	r, _ := newTestRegistry(time.Hour, 0)
 
 	for _, id := range []string{"a", "b", "c", "d", "e"} {
-		r.remember(id, "svc-1", "ns-1")
+		r.Remember(id, "svc-1", "ns-1")
 	}
 	if got := len(r.channels); got != 5 {
 		t.Errorf("len(channels) = %d, want 5; 0 must mean unlimited", got)
@@ -116,13 +116,13 @@ func TestRegistryZeroMaxChannelsDisablesCap(t *testing.T) {
 // sweeps rather than only after one. It previously only moved inside sweep(),
 // which meant it read 0 for up to a full TTL after startup.
 func TestRegistryGaugeUpdatesWithoutASweep(t *testing.T) {
-	t.Cleanup(func() { trackedChannels.Set(0) })
+	t.Cleanup(func() { metrics.TrackedChannels.Set(0) })
 
 	r, _ := newTestRegistry(time.Hour, 10)
-	r.remember("a", "svc-1", "ns-1")
-	r.remember("b", "svc-1", "ns-1")
+	r.Remember("a", "svc-1", "ns-1")
+	r.Remember("b", "svc-1", "ns-1")
 
-	if got := testutil.ToFloat64(trackedChannels); got != 2 {
+	if got := testutil.ToFloat64(metrics.TrackedChannels); got != 2 {
 		t.Errorf("hubble_authz_tracked_channels = %v, want 2 before any sweep", got)
 	}
 }
@@ -130,14 +130,14 @@ func TestRegistryGaugeUpdatesWithoutASweep(t *testing.T) {
 // Evicting a live channel is a capacity signal an operator must be able to see;
 // silently dropping state would look like the filter misbehaving.
 func TestRegistryCountsEvictions(t *testing.T) {
-	before := testutil.ToFloat64(channelEvictionsTotal)
+	before := testutil.ToFloat64(metrics.ChannelEvictionsTotal)
 
 	r, clk := newTestRegistry(time.Hour, 1)
-	r.remember("a", "svc-1", "ns-1")
+	r.Remember("a", "svc-1", "ns-1")
 	clk.advance(time.Second)
-	r.remember("b", "svc-1", "ns-1")
+	r.Remember("b", "svc-1", "ns-1")
 
-	if got := testutil.ToFloat64(channelEvictionsTotal) - before; got != 1 {
+	if got := testutil.ToFloat64(metrics.ChannelEvictionsTotal) - before; got != 1 {
 		t.Errorf("evictions counted = %v, want 1", got)
 	}
 }
@@ -147,15 +147,15 @@ func TestRegistryCountsEvictions(t *testing.T) {
 func TestRegistryEvictionDropsPeers(t *testing.T) {
 	r, clk := newTestRegistry(time.Hour, 1)
 
-	r.rememberPeer("a", "svc-peer")
-	if !r.isPeer("a", "svc-peer") {
+	r.RememberPeer("a", "svc-peer")
+	if !r.IsPeer("a", "svc-peer") {
 		t.Fatal("peer was not recorded")
 	}
 	clk.advance(time.Second)
 
-	r.remember("b", "svc-1", "ns-1") // evicts "a"
+	r.Remember("b", "svc-1", "ns-1") // evicts "a"
 
-	if r.isPeer("a", "svc-peer") {
+	if r.IsPeer("a", "svc-peer") {
 		t.Error("peer state survived its channel's eviction")
 	}
 }

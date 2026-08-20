@@ -30,6 +30,14 @@ import (
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/puzzle/hubble-authz-proxy/internal/authz"
+	"github.com/puzzle/hubble-authz-proxy/internal/authz/rbac"
+	"github.com/puzzle/hubble-authz-proxy/internal/identity"
+	"github.com/puzzle/hubble-authz-proxy/internal/logging"
+	"github.com/puzzle/hubble-authz-proxy/internal/metrics"
+	"github.com/puzzle/hubble-authz-proxy/internal/proxy"
+	"github.com/puzzle/hubble-authz-proxy/internal/registry"
 )
 
 // version is stamped at build time with -ldflags "-X main.version=...".
@@ -41,7 +49,7 @@ func main() {
 		metricsListen = flag.String("metrics-listen", ":9090", "address serving /metrics and /healthz; empty disables it")
 		backendURL    = flag.String("backend", "http://hubble-ui-backend:8090", "upstream hubble-ui backend base URL")
 		apiPrefix     = flag.String("api-prefix", "/api", "path prefix carrying backend routes; everything else is passed through")
-		identityPfx   = flag.String("identity-header-prefix", AuthRequestPrefix,
+		identityPfx   = flag.String("identity-header-prefix", identity.AuthRequestPrefix,
 			"header family carrying the caller identity: X-Auth-Request (nginx auth_request / Traefik forwardAuth) or X-Forwarded (oauth2-proxy as the reverse proxy)")
 		mode        = flag.String("authz", "static", "authorization backend: static | rbac")
 		mapFile     = flag.String("authz-config", "/etc/hubble-authz/mapping.yaml", "static mode: group/user -> namespace mapping")
@@ -53,7 +61,7 @@ func main() {
 				"caller's cached scope sooner than -rbac-ttl when access changes; falls back to TTL-only "+
 				"if the ServiceAccount lacks watch permission (never fatal)")
 		channelTTL    = flag.Duration("channel-ttl", 10*time.Minute, "how long to keep per-channel service-map state after a client goes idle")
-		maxChannels   = flag.Int("max-channels", defaultMaxChannels, "cap on client channels holding service-map state; the least recently used is dropped past this")
+		maxChannels   = flag.Int("max-channels", registry.DefaultMaxChannels, "cap on client channels holding service-map state; the least recently used is dropped past this")
 		reqBoth       = flag.Bool("require-both-endpoints", false, "only show traffic when BOTH endpoints are in allowed namespaces (stricter)")
 		shutdownGrace = flag.Duration("shutdown-timeout", 20*time.Second, "how long to let in-flight requests finish after SIGTERM")
 		maxResponse   = flag.Int64("max-response-bytes", 8<<20,
@@ -64,7 +72,7 @@ func main() {
 	)
 	flag.Parse()
 
-	logger := newLogger(*logLevel, *logFormat)
+	logger := logging.New(*logLevel, *logFormat)
 	slog.SetDefault(logger)
 
 	backend, err := url.Parse(*backendURL)
@@ -84,24 +92,24 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
-	var authz Authorizer
+	var authorizer authz.Authorizer
 	switch *mode {
 	case "static":
-		var staticAuthz *StaticAuthorizer
-		staticAuthz, err = NewStaticAuthorizer(*mapFile, logger)
+		var staticAuthz *authz.StaticAuthorizer
+		staticAuthz, err = authz.NewStaticAuthorizer(*mapFile, logger)
 		if err == nil {
 			go staticAuthz.RunReloader(ctx, *mapReload)
-			authz = staticAuthz
+			authorizer = staticAuthz
 		}
 	case "rbac":
-		var rbacAuthz *RBACAuthorizer
-		rbacAuthz, err = NewRBACAuthorizer(*rbacTTL, *rbacWorkers)
+		var rbacAuthz *rbac.Authorizer
+		rbacAuthz, err = rbac.New(*rbacTTL, *rbacWorkers)
 		if err == nil {
 			go rbacAuthz.RunSweeper(ctx)
 			if *rbacWatch {
 				go rbacAuthz.RunWatch(ctx, logger)
 			}
-			authz = rbacAuthz
+			authorizer = rbacAuthz
 		}
 	default:
 		err = errors.New("unknown -authz mode (want static|rbac)")
@@ -110,17 +118,16 @@ func main() {
 		logger.Error("cannot start authorizer", "mode", *mode, "err", err)
 		os.Exit(1)
 	}
-	authz = Instrumented(authz, *mode)
+	authorizer = authz.Instrumented(authorizer, *mode)
 
-	reg := newServiceRegistry(*channelTTL)
-	reg.maxChannels = *maxChannels
+	reg := registry.New(*channelTTL, *maxChannels)
 	go reg.RunSweeper(ctx)
 
-	proxy := NewProxy(backend, authz, reg, *apiPrefix, *reqBoth, *identityPfx, *maxResponse, *notifyEmpty, logger)
+	handler := proxy.New(backend, authorizer, reg, *apiPrefix, *reqBoth, *identityPfx, *maxResponse, *notifyEmpty, logger)
 
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           proxy,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
@@ -128,7 +135,7 @@ func main() {
 	if *metricsListen != "" {
 		metricsSrv = &http.Server{
 			Addr:              *metricsListen,
-			Handler:           metricsHandler(metricsRegistry(version, knownRoutes)),
+			Handler:           metrics.Handler(metrics.NewRegistry(version, proxy.KnownRoutes)),
 			ReadHeaderTimeout: 10 * time.Second,
 		}
 		go func() {

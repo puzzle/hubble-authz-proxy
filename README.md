@@ -765,6 +765,25 @@ helm lint ./charts/hubble-authz-proxy
 helm template hap ./charts/hubble-authz-proxy
 ```
 
+### Layout
+
+```text
+cmd/hubble-authz-proxy/   entry point: flags, wiring, lifecycle
+internal/proxy/           the proxy itself — relay, envelope, response filtering
+internal/authz/           Scope + the Authorizer contract, and the static mapping
+internal/authz/rbac/      the SubjectAccessReview authorizer and its RBAC watch
+internal/registry/        per-channel service-ID -> namespace memory
+internal/identity/        the caller, derived from the authenticator's headers
+internal/metrics/         collectors and the label vocabulary they export with
+internal/logging/         the process logger
+```
+
+Imports point one way, inward: `internal/metrics`, `internal/identity` and
+`internal/logging` depend on nothing else here, and `internal/metrics` in
+particular takes the version string and the route names as parameters rather
+than reaching for them — which is what keeps every other package free to
+import it.
+
 The `e2e` suite runs the **real hubble-ui backend container** in its
 `E2E_TEST_MODE`, which swaps the backend's whole clients layer for one fed by
 log files — so it needs neither relay nor Kubernetes. The flows in those files
@@ -774,9 +793,9 @@ control and the assertions are deterministic.
 It is the only test that exercises the filter against the backend's *real*
 aggregation. Everything else builds its input with the same code under test, so
 a wrong assumption about the wire format, or about how `ServiceLink` endpoints
-are identified, would be invisible. `testdata/` holds a real control-stream
-response captured from a live cluster (node names and addresses replaced with
-placeholders) to guard the decode path the same way.
+are identified, would be invisible. `internal/proxy/testdata/` holds a real
+control-stream response captured from a live cluster (node names and addresses
+replaced with placeholders) to guard the decode path the same way.
 
 Go 1.26+ is required — the `hubble-ui/backend` module sets that floor.
 

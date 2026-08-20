@@ -1,10 +1,11 @@
-package main
+package proxy
 
 import (
 	"os"
 	"testing"
 
 	uipb "github.com/cilium/hubble-ui/backend/proto/ui"
+	"github.com/puzzle/hubble-authz-proxy/internal/identity"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -67,7 +68,7 @@ func TestGoldenNodeStatusReachesScopedCaller(t *testing.T) {
 	p := testProxy(false)
 	// A caller scoped to a namespace that does not appear anywhere in the
 	// payload: nothing here is theirs, yet the status still passes.
-	out, err := p.filterBody(route, channel, body, scopeOf("some-unrelated-ns"), Identity{})
+	out, err := p.filterBody(route, channel, body, scopeOf("some-unrelated-ns"), identity.Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +114,7 @@ func TestGoldenNamespacesAreFiltered(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := testProxy(false).filterBody(route, channel, nsBody, scopeOf("payments"), Identity{})
+	out, err := testProxy(false).filterBody(route, channel, nsBody, scopeOf("payments"), identity.Identity{})
 	if err != nil {
 		t.Fatal(err)
 	}

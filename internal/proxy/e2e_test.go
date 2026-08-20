@@ -15,7 +15,7 @@
 //	go test -tags e2e -run TestE2E ./...
 //
 // Requires Docker. Skips if it is unavailable.
-package main
+package proxy
 
 import (
 	"bytes"
@@ -37,6 +37,9 @@ import (
 	observerpb "github.com/cilium/cilium/api/v1/observer"
 	cppb "github.com/cilium/hubble-ui/backend/proto/customprotocol"
 	uipb "github.com/cilium/hubble-ui/backend/proto/ui"
+	"github.com/puzzle/hubble-authz-proxy/internal/authz"
+	"github.com/puzzle/hubble-authz-proxy/internal/identity"
+	"github.com/puzzle/hubble-authz-proxy/internal/registry"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -224,13 +227,13 @@ func startBackend(t *testing.T, fixtureDir string) string {
 }
 
 // startProxy runs our proxy in-process against the backend.
-func startProxy(t *testing.T, backendURL string, authz Authorizer, requireBoth bool) *httptest.Server {
+func startProxy(t *testing.T, backendURL string, authz authz.Authorizer, requireBoth bool) *httptest.Server {
 	t.Helper()
 	u, err := url.Parse(backendURL)
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := httptest.NewServer(NewProxy(u, authz, newServiceRegistry(time.Minute), "/api", requireBoth, AuthRequestPrefix, testMaxResponse, true, testLogger()))
+	srv := httptest.NewServer(New(u, authz, registry.New(time.Minute, registry.DefaultMaxChannels), "/api", requireBoth, identity.AuthRequestPrefix, testMaxResponse, true, testLogger()))
 	t.Cleanup(srv.Close)
 	return srv
 }
@@ -484,7 +487,7 @@ func TestE2EAdminSeesEverything(t *testing.T) {
 	writeFixtures(t, dir)
 	backend := startBackend(t, dir)
 
-	proxy := startProxy(t, backend, fakeAuthorizer{scope: Scope{All: true}}, false)
+	proxy := startProxy(t, backend, fakeAuthorizer{scope: authz.Scope{All: true}}, false)
 
 	got := drive(t, proxy.URL, map[string]string{
 		"X-Auth-Request-Email": "alice@example.com",
@@ -525,7 +528,7 @@ func TestE2EEmptyScopeIsExplained(t *testing.T) {
 	backend := startBackend(t, dir)
 
 	// Scope{} is what a user in no mapped group resolves to.
-	proxy := startProxy(t, backend, fakeAuthorizer{scope: Scope{}}, false)
+	proxy := startProxy(t, backend, fakeAuthorizer{scope: authz.Scope{}}, false)
 
 	// The channel ID from the first response has to be echoed back on every
 	// later poll. Opening a fresh channel each time instead leaves the backend
@@ -600,7 +603,8 @@ func keys(m map[string]bool) []string {
 // have no coverage at all. Same failure shape as a metric that is never exported
 // at zero, and just as invisible.
 func TestE2EMatrixCoversDefaultPin(t *testing.T) {
-	const workflow = ".github/workflows/e2e.yml"
+	// Relative to this package, not the repo root.
+	const workflow = "../../.github/workflows/e2e.yml"
 
 	raw, err := os.ReadFile(workflow)
 	if err != nil {
