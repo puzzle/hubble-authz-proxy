@@ -1,9 +1,9 @@
 <!-- markdownlint-disable MD041 -->
 ![hubble-authz-proxy](doc/images/hubble-authz-proxy-logo.svg)
 
-[![PR Quality](https://github.com/splattner/hubble-authz-proxy/actions/workflows/pr-quality.yml/badge.svg)](https://github.com/splattner/hubble-authz-proxy/actions/workflows/pr-quality.yml)
-[![E2E](https://github.com/splattner/hubble-authz-proxy/actions/workflows/e2e.yml/badge.svg)](https://github.com/splattner/hubble-authz-proxy/actions/workflows/e2e.yml)
-[![Release Please](https://github.com/splattner/hubble-authz-proxy/actions/workflows/release-please.yml/badge.svg)](https://github.com/splattner/hubble-authz-proxy/actions/workflows/release-please.yml)
+[![PR Quality](https://github.com/puzzle/hubble-authz-proxy/actions/workflows/pr-quality.yml/badge.svg)](https://github.com/puzzle/hubble-authz-proxy/actions/workflows/pr-quality.yml)
+[![E2E](https://github.com/puzzle/hubble-authz-proxy/actions/workflows/e2e.yml/badge.svg)](https://github.com/puzzle/hubble-authz-proxy/actions/workflows/e2e.yml)
+[![Release Please](https://github.com/puzzle/hubble-authz-proxy/actions/workflows/release-please.yml/badge.svg)](https://github.com/puzzle/hubble-authz-proxy/actions/workflows/release-please.yml)
 
 Namespace-scoped authorization for the **Hubble UI** on **Cilium OSS**.
 
@@ -111,7 +111,7 @@ rather than a pass-through.
 ## Install
 
 ```console
-helm repo add hubble-authz-proxy https://splattner.github.io/hubble-authz-proxy
+helm repo add hubble-authz-proxy https://puzzle.github.io/hubble-authz-proxy
 helm repo update
 helm install hubble-authz-proxy hubble-authz-proxy/hubble-authz-proxy \
   --namespace kube-system \
@@ -851,7 +851,7 @@ protobuf, or the backend terminates the channel with 400. Confirm the path with
 PR titles follow [Conventional Commits](https://www.conventionalcommits.org/);
 this is enforced by CI. [Release Please](https://github.com/googleapis/release-please)
 handles SemVer tagging, the changelog, and keeps `Chart.yaml` in step. Released
-images are published to `ghcr.io/splattner/hubble-authz-proxy`, signed with
+images are published to `ghcr.io/puzzle/hubble-authz-proxy`, signed with
 cosign (keyless), and carry an SPDX SBOM attestation.
 
 ## License

@@ -1,4 +1,4 @@
-module github.com/splattner/hubble-authz-proxy
+module github.com/puzzle/hubble-authz-proxy
 
 go 1.26.2
 
