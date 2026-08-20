@@ -1,4 +1,4 @@
-package main
+package rbac
 
 import (
 	"context"
@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/puzzle/hubble-authz-proxy/internal/authz"
+	"github.com/puzzle/hubble-authz-proxy/internal/identity"
 	authzv1 "k8s.io/api/authorization/v1"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
@@ -18,7 +20,7 @@ import (
 )
 
 type fakeCluster struct {
-	authz  *RBACAuthorizer
+	authz  *Authorizer
 	client *fake.Clientset
 	sars   *atomic.Int64
 	// beforeSAR, when set, runs before each review is answered. Used to hold
@@ -28,7 +30,7 @@ type fakeCluster struct {
 	mu        sync.Mutex
 }
 
-// newFakeCluster builds an RBACAuthorizer over a fake API server where the
+// newFakeCluster builds an Authorizer over a fake API server where the
 // caller may list pods exactly in allowedNamespaces.
 func newFakeCluster(t *testing.T, namespaces []string, allowedNamespaces []string, ttl time.Duration) *fakeCluster {
 	t.Helper()
@@ -64,12 +66,12 @@ func newFakeCluster(t *testing.T, namespaces []string, allowedNamespaces []strin
 			return true, sar, nil
 		})
 
-	fc.authz = newRBACAuthorizer(client, ttl)
+	fc.authz = newAuthorizer(client, ttl)
 	fc.client = client
 	return fc
 }
 
-func cacheHasKey(fc *fakeCluster, id Identity) bool {
+func cacheHasKey(fc *fakeCluster, id identity.Identity) bool {
 	fc.authz.mu.Lock()
 	defer fc.authz.mu.Unlock()
 	_, ok := fc.authz.cache[cacheKey(id)]
@@ -103,7 +105,7 @@ func (fc *fakeCluster) setErr(err error) {
 	fc.sarErr = err
 }
 
-var testIdentity = Identity{Email: "bob@example.com", Groups: []string{"team-payments"}}
+var testIdentity = identity.Identity{Email: "bob@example.com", Groups: []string{"team-payments"}}
 
 func TestRBACResolvesAllowedNamespaces(t *testing.T) {
 	fc := newFakeCluster(t,
@@ -226,7 +228,7 @@ func TestRBACCacheIsBounded(t *testing.T) {
 	// Every distinct identity that reaches the proxy creates an entry, and the
 	// identity is caller-supplied, so the map must not grow without bound.
 	for i := range 100 {
-		id := Identity{Email: string(rune('a'+i%26)) + string(rune('a'+i/26)) + "@example.com"}
+		id := identity.Identity{Email: string(rune('a'+i%26)) + string(rune('a'+i/26)) + "@example.com"}
 		if _, err := fc.authz.AllowedNamespaces(context.Background(), id); err != nil {
 			t.Fatal(err)
 		}
@@ -262,19 +264,19 @@ func TestRBACSweepDropsExpired(t *testing.T) {
 // Group order comes from HTTP headers and is not guaranteed stable; keying on
 // the raw order would duplicate entries and re-run the sweep for each variant.
 func TestRBACCacheKeyIgnoresGroupOrder(t *testing.T) {
-	a := Identity{Email: "bob@example.com", Groups: []string{"team-search", "team-payments"}}
-	b := Identity{Email: "bob@example.com", Groups: []string{"team-payments", "team-search"}}
+	a := identity.Identity{Email: "bob@example.com", Groups: []string{"team-search", "team-payments"}}
+	b := identity.Identity{Email: "bob@example.com", Groups: []string{"team-payments", "team-search"}}
 	if cacheKey(a) != cacheKey(b) {
 		t.Errorf("cacheKey differs by group order:\n %q\n %q", cacheKey(a), cacheKey(b))
 	}
 
 	// Different identities must still be distinguished, including when a group
 	// name could be confused with a boundary.
-	c := Identity{Email: "bob@example.com", Groups: []string{"team-payments"}}
+	c := identity.Identity{Email: "bob@example.com", Groups: []string{"team-payments"}}
 	if cacheKey(b) == cacheKey(c) {
 		t.Error("cacheKey collided across different group sets")
 	}
-	d := Identity{User: "bob@example.com"}
+	d := identity.Identity{User: "bob@example.com"}
 	if cacheKey(c) == cacheKey(d) {
 		t.Error("cacheKey collided across user and email fields")
 	}
@@ -347,7 +349,7 @@ func startWatch(t *testing.T, fc *fakeCluster) context.Context {
 
 func TestRBACWatchRoleBindingAddInvalidatesMatchingUser(t *testing.T) {
 	fc := newFakeCluster(t, []string{"payments"}, []string{"payments"}, time.Minute)
-	alice := Identity{User: "alice"}
+	alice := identity.Identity{User: "alice"}
 	if _, err := fc.authz.AllowedNamespaces(context.Background(), alice); err != nil {
 		t.Fatal(err)
 	}
@@ -385,7 +387,7 @@ func TestRBACWatchRoleBindingDeleteInvalidatesRemovedSubject(t *testing.T) {
 	// RoleBinding would itself evict the entry before Delete is ever exercised.
 	ctx := startWatch(t, fc)
 
-	alice := Identity{User: "alice"}
+	alice := identity.Identity{User: "alice"}
 	if _, err := fc.authz.AllowedNamespaces(ctx, alice); err != nil {
 		t.Fatal(err)
 	}
@@ -413,8 +415,8 @@ func TestRBACWatchRoleBindingUpdateInvalidatesOldAndNewSubjects(t *testing.T) {
 	// is warmed.
 	ctx := startWatch(t, fc)
 
-	alice := Identity{User: "alice"}
-	bob := Identity{User: "bob"}
+	alice := identity.Identity{User: "alice"}
+	bob := identity.Identity{User: "bob"}
 	if _, err := fc.authz.AllowedNamespaces(ctx, alice); err != nil {
 		t.Fatal(err)
 	}
@@ -462,8 +464,8 @@ func TestRBACWatchClusterRoleUpdateInvalidatesBoundSubjects(t *testing.T) {
 	// see the comment in TestRBACWatchRoleBindingDeleteInvalidatesRemovedSubject.
 	ctx := startWatch(t, fc)
 
-	teamA := Identity{Groups: []string{"team-a"}}
-	carol := Identity{User: "carol"}
+	teamA := identity.Identity{Groups: []string{"team-a"}}
+	carol := identity.Identity{User: "carol"}
 	if _, err := fc.authz.AllowedNamespaces(ctx, teamA); err != nil {
 		t.Fatal(err)
 	}
@@ -519,8 +521,8 @@ func TestRBACWatchRoleUpdateRespectsNamespace(t *testing.T) {
 	// see the comment in TestRBACWatchRoleBindingDeleteInvalidatesRemovedSubject.
 	ctx := startWatch(t, fc)
 
-	xavier := Identity{User: "xavier"}
-	yolanda := Identity{User: "yolanda"}
+	xavier := identity.Identity{User: "xavier"}
+	yolanda := identity.Identity{User: "yolanda"}
 	if _, err := fc.authz.AllowedNamespaces(ctx, xavier); err != nil {
 		t.Fatal(err)
 	}
@@ -548,17 +550,17 @@ func TestRBACWatchRoleUpdateRespectsNamespace(t *testing.T) {
 func TestRBACWatchNamespaceDeleteInvalidatesContainingEntries(t *testing.T) {
 	fc := newFakeCluster(t, []string{"payments", "search"}, nil, time.Minute)
 
-	scoped := Identity{User: "scoped"}
-	admin := Identity{User: "admin"}
+	scoped := identity.Identity{User: "scoped"}
+	admin := identity.Identity{User: "admin"}
 	future := time.Now().Add(time.Hour)
 	fc.authz.mu.Lock()
 	fc.authz.cache[cacheKey(scoped)] = cachedScope{
-		scope:   Scope{Namespaces: map[string]bool{"payments": true}},
+		scope:   authz.Scope{Namespaces: map[string]bool{"payments": true}},
 		expires: future,
 		id:      scoped,
 	}
 	fc.authz.cache[cacheKey(admin)] = cachedScope{
-		scope:   Scope{All: true},
+		scope:   authz.Scope{All: true},
 		expires: future,
 		id:      admin,
 	}

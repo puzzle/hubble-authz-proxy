@@ -1,4 +1,7 @@
-package main
+// Package authz resolves which namespaces a caller may see. It defines the
+// Authorizer contract and the static, file-backed implementation; the RBAC one
+// lives in the rbac subpackage.
+package authz
 
 import (
 	"context"
@@ -10,6 +13,8 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/puzzle/hubble-authz-proxy/internal/identity"
+	"github.com/puzzle/hubble-authz-proxy/internal/metrics"
 	"sigs.k8s.io/yaml"
 )
 
@@ -20,8 +25,9 @@ type Scope struct {
 	Namespaces map[string]bool
 }
 
+// Authorizer resolves which namespaces a caller may see.
 type Authorizer interface {
-	AllowedNamespaces(ctx context.Context, id Identity) (Scope, error)
+	AllowedNamespaces(ctx context.Context, id identity.Identity) (Scope, error)
 }
 
 // instrumentedAuthorizer times scope resolution regardless of the backing mode.
@@ -40,8 +46,8 @@ func Instrumented(next Authorizer, mode string) Authorizer {
 	return instrumentedAuthorizer{next: next, mode: mode}
 }
 
-func (a instrumentedAuthorizer) AllowedNamespaces(ctx context.Context, id Identity) (Scope, error) {
-	timer := prometheus.NewTimer(scopeResolutionDuration.WithLabelValues(a.mode))
+func (a instrumentedAuthorizer) AllowedNamespaces(ctx context.Context, id identity.Identity) (Scope, error) {
+	timer := prometheus.NewTimer(metrics.ScopeResolutionDuration.WithLabelValues(a.mode))
 	defer timer.ObserveDuration()
 	return a.next.AllowedNamespaces(ctx, id)
 }
@@ -87,6 +93,8 @@ type StaticAuthorizer struct {
 	sum [sha256.Size]byte
 }
 
+// NewStaticAuthorizer reads the mapping at path once, failing if it is absent
+// or unparseable: coming up with no mapping would silently deny everyone.
 func NewStaticAuthorizer(path string, logger *slog.Logger) (*StaticAuthorizer, error) {
 	if logger == nil {
 		logger = slog.Default()
@@ -154,18 +162,18 @@ func (a *StaticAuthorizer) RunReloader(ctx context.Context, interval time.Durati
 		case <-t.C:
 			changed, err := a.reload()
 			if err != nil {
-				mappingReloads.WithLabelValues(reloadError).Inc()
+				metrics.MappingReloads.WithLabelValues(metrics.ReloadError).Inc()
 				a.log.Error("cannot reload mapping; keeping the previous one",
 					"path", a.path, "err", err)
 				continue
 			}
 			if !changed {
-				mappingReloads.WithLabelValues(reloadUnchanged).Inc()
-				mappingLastReload.SetToCurrentTime()
+				metrics.MappingReloads.WithLabelValues(metrics.ReloadUnchanged).Inc()
+				metrics.MappingLastReload.SetToCurrentTime()
 				continue
 			}
-			mappingReloads.WithLabelValues(reloadChanged).Inc()
-			mappingLastReload.SetToCurrentTime()
+			metrics.MappingReloads.WithLabelValues(metrics.ReloadChanged).Inc()
+			metrics.MappingLastReload.SetToCurrentTime()
 
 			// Counts, not contents: enough to confirm the edit landed without
 			// writing everyone's namespace assignments into the log.
@@ -181,7 +189,8 @@ func (a *StaticAuthorizer) RunReloader(ctx context.Context, interval time.Durati
 	}
 }
 
-func (a *StaticAuthorizer) AllowedNamespaces(_ context.Context, id Identity) (Scope, error) {
+// AllowedNamespaces resolves the caller against the mapping in force.
+func (a *StaticAuthorizer) AllowedNamespaces(_ context.Context, id identity.Identity) (Scope, error) {
 	a.mu.RLock()
 	m := a.m
 	a.mu.RUnlock()

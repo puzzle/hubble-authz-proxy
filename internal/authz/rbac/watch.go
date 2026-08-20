@@ -1,10 +1,11 @@
-package main
+package rbac
 
 import (
 	"context"
 	"log/slog"
 	"time"
 
+	"github.com/puzzle/hubble-authz-proxy/internal/metrics"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -54,7 +55,7 @@ var rbacWatchSyncTimeout = 30 * time.Second
 // into permanent error spam plus a permanent trickle of 403s at the apiserver,
 // which is exactly what an operator sees when the image is upgraded ahead of
 // the chart's RBAC rules.
-func (a *RBACAuthorizer) RunWatch(ctx context.Context, logger *slog.Logger) {
+func (a *Authorizer) RunWatch(ctx context.Context, logger *slog.Logger) {
 	ctx, stopInformers := context.WithCancel(ctx)
 	defer stopInformers()
 
@@ -78,7 +79,7 @@ func (a *RBACAuthorizer) RunWatch(ctx context.Context, logger *slog.Logger) {
 		{"namespaces", nsInformer, cache.ResourceEventHandlerFuncs{
 			// AddFunc intentionally unset: a new namespace only ever widens
 			// access, and Scope{All:true} entries see it for free already (see
-			// resolve()'s comment in authz_rbac.go) — not a revocation concern.
+			// resolve()'s comment in rbac.go) — not a revocation concern.
 			DeleteFunc: func(obj any) {
 				ns, ok := unwrapTombstone(obj).(*corev1.Namespace)
 				if !ok {
@@ -116,7 +117,7 @@ func (a *RBACAuthorizer) RunWatch(ctx context.Context, logger *slog.Logger) {
 		{"rolebindings", rbInformer, cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj any) {
 				if rb, ok := obj.(*rbacv1.RoleBinding); ok {
-					a.invalidateSubjects(rb.Subjects, resourceRoleBinding)
+					a.invalidateSubjects(rb.Subjects, metrics.ResourceRoleBinding)
 				}
 			},
 			UpdateFunc: func(oldObj, newObj any) {
@@ -127,18 +128,18 @@ func (a *RBACAuthorizer) RunWatch(ctx context.Context, logger *slog.Logger) {
 				}
 				// Both old and new subjects: a subject REMOVED from the binding
 				// needs its stale ALLOW entry invalidated too.
-				a.invalidateSubjects(append(append([]rbacv1.Subject{}, old.Subjects...), cur.Subjects...), resourceRoleBinding)
+				a.invalidateSubjects(append(append([]rbacv1.Subject{}, old.Subjects...), cur.Subjects...), metrics.ResourceRoleBinding)
 			},
 			DeleteFunc: func(obj any) {
 				if rb, ok := unwrapTombstone(obj).(*rbacv1.RoleBinding); ok {
-					a.invalidateSubjects(rb.Subjects, resourceRoleBinding)
+					a.invalidateSubjects(rb.Subjects, metrics.ResourceRoleBinding)
 				}
 			},
 		}},
 		{"clusterrolebindings", crbInformer, cache.ResourceEventHandlerFuncs{
 			AddFunc: func(obj any) {
 				if crb, ok := obj.(*rbacv1.ClusterRoleBinding); ok {
-					a.invalidateSubjects(crb.Subjects, resourceClusterRoleBinding)
+					a.invalidateSubjects(crb.Subjects, metrics.ResourceClusterRoleBinding)
 				}
 			},
 			UpdateFunc: func(oldObj, newObj any) {
@@ -147,11 +148,11 @@ func (a *RBACAuthorizer) RunWatch(ctx context.Context, logger *slog.Logger) {
 				if !ok1 || !ok2 {
 					return
 				}
-				a.invalidateSubjects(append(append([]rbacv1.Subject{}, old.Subjects...), cur.Subjects...), resourceClusterRoleBinding)
+				a.invalidateSubjects(append(append([]rbacv1.Subject{}, old.Subjects...), cur.Subjects...), metrics.ResourceClusterRoleBinding)
 			},
 			DeleteFunc: func(obj any) {
 				if crb, ok := unwrapTombstone(obj).(*rbacv1.ClusterRoleBinding); ok {
-					a.invalidateSubjects(crb.Subjects, resourceClusterRoleBinding)
+					a.invalidateSubjects(crb.Subjects, metrics.ResourceClusterRoleBinding)
 				}
 			},
 		}},
@@ -161,7 +162,7 @@ func (a *RBACAuthorizer) RunWatch(ctx context.Context, logger *slog.Logger) {
 		if _, err := h.informer.AddEventHandler(h.funcs); err != nil {
 			logger.Warn("rbac watch: cannot register handler; continuing in TTL-only mode",
 				"resource", h.name, "err", err)
-			rbacWatchActive.Set(0)
+			metrics.RBACWatchActive.Set(0)
 			return
 		}
 	}
@@ -179,21 +180,21 @@ func (a *RBACAuthorizer) RunWatch(ctx context.Context, logger *slog.Logger) {
 	case ok := <-synced:
 		if !ok {
 			logger.Warn("rbac watch: cache sync did not complete; continuing in TTL-only mode")
-			rbacWatchActive.Set(0)
+			metrics.RBACWatchActive.Set(0)
 			return
 		}
 	case <-time.After(rbacWatchSyncTimeout):
 		logger.Warn("rbac watch: cache sync timed out; continuing in TTL-only mode "+
 			"(likely missing watch/list RBAC on Roles/ClusterRoles/RoleBindings/ClusterRoleBindings/Namespaces)",
 			"timeout", rbacWatchSyncTimeout)
-		rbacWatchActive.Set(0)
+		metrics.RBACWatchActive.Set(0)
 		return
 	case <-ctx.Done():
 		return
 	}
 
 	logger.Info("rbac watch: cache-invalidation active")
-	rbacWatchActive.Set(1)
+	metrics.RBACWatchActive.Set(1)
 	<-ctx.Done()
 }
 
@@ -258,11 +259,11 @@ func trimMeta(m *metav1.ObjectMeta) {
 // Namespace-scoped lookup matters: a Role only binds within its own
 // namespace, so a same-named RoleBinding elsewhere references a DIFFERENT
 // Role object entirely and must not be matched.
-func (a *RBACAuthorizer) onRoleChanged(logger *slog.Logger, namespace, name string) {
+func (a *Authorizer) onRoleChanged(logger *slog.Logger, namespace, name string) {
 	bindings, err := a.roleBindingLister.RoleBindings(namespace).List(labels.Everything())
 	if err != nil {
 		logger.Warn("rbac watch: reverse lookup failed; a stale entry may outlive this event (ttl backstop still applies)",
-			"resource", resourceRole, "namespace", namespace, "name", name, "err", err)
+			"resource", metrics.ResourceRole, "namespace", namespace, "name", name, "err", err)
 		return
 	}
 	var subjects []rbacv1.Subject
@@ -271,7 +272,7 @@ func (a *RBACAuthorizer) onRoleChanged(logger *slog.Logger, namespace, name stri
 			subjects = append(subjects, rb.Subjects...)
 		}
 	}
-	a.invalidateSubjects(subjects, resourceRole)
+	a.invalidateSubjects(subjects, metrics.ResourceRole)
 }
 
 // onClusterRoleChanged handles a ClusterRole update/delete: it may be
@@ -279,12 +280,12 @@ func (a *RBACAuthorizer) onRoleChanged(logger *slog.Logger, namespace, name stri
 // ClusterRole aggregation via aggregationRule needs no handling here: the API
 // server itself rewrites the aggregate ClusterRole's .rules and emits its own
 // Update event for that object.
-func (a *RBACAuthorizer) onClusterRoleChanged(logger *slog.Logger, name string) {
+func (a *Authorizer) onClusterRoleChanged(logger *slog.Logger, name string) {
 	var subjects []rbacv1.Subject
 
 	rbs, err := a.roleBindingLister.List(labels.Everything())
 	if err != nil {
-		logger.Warn("rbac watch: reverse lookup failed", "resource", resourceClusterRole, "name", name, "err", err)
+		logger.Warn("rbac watch: reverse lookup failed", "resource", metrics.ResourceClusterRole, "name", name, "err", err)
 		return
 	}
 	for _, rb := range rbs {
@@ -295,7 +296,7 @@ func (a *RBACAuthorizer) onClusterRoleChanged(logger *slog.Logger, name string) 
 
 	crbs, err := a.clusterRoleBindingLister.List(labels.Everything())
 	if err != nil {
-		logger.Warn("rbac watch: reverse lookup failed", "resource", resourceClusterRole, "name", name, "err", err)
+		logger.Warn("rbac watch: reverse lookup failed", "resource", metrics.ResourceClusterRole, "name", name, "err", err)
 		return
 	}
 	for _, crb := range crbs {
@@ -303,13 +304,13 @@ func (a *RBACAuthorizer) onClusterRoleChanged(logger *slog.Logger, name string) 
 			subjects = append(subjects, crb.Subjects...)
 		}
 	}
-	a.invalidateSubjects(subjects, resourceClusterRole)
+	a.invalidateSubjects(subjects, metrics.ResourceClusterRole)
 }
 
 // invalidateSubjects evicts any cached entry belonging to one of the given
 // RBAC subjects. Kind=ServiceAccount is ignored: this proxy's identities come
 // from oauth2-proxy headers and are never ServiceAccount-shaped.
-func (a *RBACAuthorizer) invalidateSubjects(subjects []rbacv1.Subject, resource string) {
+func (a *Authorizer) invalidateSubjects(subjects []rbacv1.Subject, resource string) {
 	users, groups := map[string]bool{}, map[string]bool{}
 	for _, s := range subjects {
 		switch s.Kind {
@@ -338,7 +339,7 @@ func (a *RBACAuthorizer) invalidateSubjects(subjects []rbacv1.Subject, resource 
 		}
 		if matched {
 			delete(a.cache, k)
-			rbacCacheInvalidationsTotal.WithLabelValues(resource).Inc()
+			metrics.RBACCacheInvalidationsTotal.WithLabelValues(resource).Inc()
 		}
 	}
 }
@@ -347,13 +348,13 @@ func (a *RBACAuthorizer) invalidateSubjects(subjects []rbacv1.Subject, resource 
 // ns. Scope{All: true} entries are left alone: resolve()'s cluster-wide
 // short-circuit never enumerates namespaces, so an admin's cache entry has
 // nothing stale to drop when one namespace disappears.
-func (a *RBACAuthorizer) invalidateNamespace(ns string) {
+func (a *Authorizer) invalidateNamespace(ns string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for k, c := range a.cache {
 		if !c.scope.All && c.scope.Namespaces[ns] {
 			delete(a.cache, k)
-			rbacCacheInvalidationsTotal.WithLabelValues(resourceNamespace).Inc()
+			metrics.RBACCacheInvalidationsTotal.WithLabelValues(metrics.ResourceNamespace).Inc()
 		}
 	}
 }

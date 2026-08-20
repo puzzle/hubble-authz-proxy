@@ -1,4 +1,7 @@
-package main
+// Package proxy sits between the Hubble UI frontend and its unmodified backend,
+// relaying requests untouched and filtering namespace-scoped data out of the
+// responses before they reach the browser.
+package proxy
 
 import (
 	"encoding/json"

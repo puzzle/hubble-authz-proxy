@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"cmp"
@@ -7,6 +7,9 @@ import (
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	uipb "github.com/cilium/hubble-ui/backend/proto/ui"
+	"github.com/puzzle/hubble-authz-proxy/internal/authz"
+	"github.com/puzzle/hubble-authz-proxy/internal/identity"
+	"github.com/puzzle/hubble-authz-proxy/internal/metrics"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -19,8 +22,8 @@ const (
 
 var errUnknownRoute = fmt.Errorf("unknown backend route")
 
-// knownRoutes is the closed set of route label values.
-var knownRoutes = []string{routeControlStream, routeServiceMapStre, routeOther}
+// KnownRoutes is the closed set of route label values.
+var KnownRoutes = []string{routeControlStream, routeServiceMapStre, routeOther}
 
 // routeOther is the catch-all for any path we do not recognise.
 const routeOther = "other"
@@ -42,7 +45,7 @@ func knownRoute(s string) string {
 // route is the route name the BACKEND reported in its response envelope, not
 // anything the client supplied, so a client cannot pick which filter runs by
 // lying about the URL or the request meta.
-func (p *Proxy) filterBody(route, channelID string, body []byte, scope Scope, id Identity) ([]byte, error) {
+func (p *Proxy) filterBody(route, channelID string, body []byte, scope authz.Scope, id identity.Identity) ([]byte, error) {
 	if len(body) == 0 {
 		return body, nil
 	}
@@ -63,7 +66,7 @@ func (p *Proxy) filterBody(route, channelID string, body []byte, scope Scope, id
 // filterControlStream drops namespaces the caller may not see from the UI's
 // namespace picker. Notifications (relay/k8s connection state, server status)
 // are cluster-wide and pass through.
-func (p *Proxy) filterControlStream(channelID string, body []byte, scope Scope, id Identity) ([]byte, error) {
+func (p *Proxy) filterControlStream(channelID string, body []byte, scope authz.Scope, id identity.Identity) ([]byte, error) {
 	resp := &uipb.GetControlStreamResponse{}
 	if err := proto.Unmarshal(body, resp); err != nil {
 		return nil, fmt.Errorf("unmarshal GetControlStreamResponse: %w", err)
@@ -78,9 +81,9 @@ func (p *Proxy) filterControlStream(channelID string, body []byte, scope Scope, 
 	for _, ns := range states.GetNamespaces() {
 		if scope.Namespaces[ns.GetNamespace().GetName()] {
 			kept = append(kept, ns)
-			eventsTotal.WithLabelValues("namespace_state", "kept").Inc()
+			metrics.EventsTotal.WithLabelValues("namespace_state", "kept").Inc()
 		} else {
-			eventsTotal.WithLabelValues("namespace_state", "dropped").Inc()
+			metrics.EventsTotal.WithLabelValues("namespace_state", "dropped").Inc()
 		}
 	}
 
@@ -93,8 +96,8 @@ func (p *Proxy) filterControlStream(channelID string, body []byte, scope Scope, 
 	// oneof, so one message carries namespaces OR a notification, never both.
 	// Nothing is lost here because the list we would have sent is empty.
 	if p.notifyEmptyScope && len(scope.Namespaces) == 0 &&
-		p.services.markEmptyScopeNotified(channelID) {
-		emptyScopeNotifications.Inc()
+		p.services.MarkEmptyScopeNotified(channelID) {
+		metrics.EmptyScopeNotifications.Inc()
 		p.log.Info("caller has no visible namespaces; sending them a NoPermission notice",
 			"user", cmp.Or(id.Email, id.User), "groups", id.Groups)
 		return proto.Marshal(noPermissionResponse(id))
@@ -114,7 +117,7 @@ func (p *Proxy) filterControlStream(channelID string, body []byte, scope Scope, 
 //
 // So resource has to complete that sentence, and error is the only place an
 // actionable explanation fits.
-func noPermissionResponse(id Identity) *uipb.GetControlStreamResponse {
+func noPermissionResponse(id identity.Identity) *uipb.GetControlStreamResponse {
 	who := cmp.Or(id.Email, id.User)
 	if who == "" {
 		who = "your account"
@@ -159,7 +162,7 @@ func noPermissionResponse(id Identity) *uipb.GetControlStreamResponse {
 // Namespace names and topology do not leak, but those totals are a coarse
 // inference channel. Removing it entirely would require filtering upstream of
 // the aggregation, i.e. between the backend and relay.
-func (p *Proxy) filterServiceMapStream(channelID string, body []byte, scope Scope) ([]byte, error) {
+func (p *Proxy) filterServiceMapStream(channelID string, body []byte, scope authz.Scope) ([]byte, error) {
 	resp := &uipb.GetEventsResponse{}
 	if err := proto.Unmarshal(body, resp); err != nil {
 		return nil, fmt.Errorf("unmarshal GetEventsResponse: %w", err)
@@ -172,7 +175,7 @@ func (p *Proxy) filterServiceMapStream(channelID string, body []byte, scope Scop
 	// — their namespace is what tells us to drop links touching them.
 	for _, ev := range resp.GetEvents() {
 		if svc := ev.GetServiceState().GetService(); svc != nil {
-			p.services.remember(channelID, svc.GetId(), svc.GetNamespace())
+			p.services.Remember(channelID, svc.GetId(), svc.GetNamespace())
 		}
 	}
 
@@ -194,18 +197,18 @@ func (p *Proxy) filterServiceMapStream(channelID string, body []byte, scope Scop
 			if link == nil {
 				continue
 			}
-			srcNS, srcKnown := p.services.lookup(channelID, link.GetSourceId())
-			dstNS, dstKnown := p.services.lookup(channelID, link.GetDestinationId())
+			srcNS, srcKnown := p.services.Lookup(channelID, link.GetSourceId())
+			dstNS, dstKnown := p.services.Lookup(channelID, link.GetDestinationId())
 			if !srcKnown || !dstKnown {
 				continue
 			}
 			// Exactly one end inside scope makes the other end a peer. Two
 			// foreign services linked to each other stay invisible.
 			if scope.Namespaces[srcNS] && !scope.Namespaces[dstNS] {
-				p.services.rememberPeer(channelID, link.GetDestinationId())
+				p.services.RememberPeer(channelID, link.GetDestinationId())
 			}
 			if scope.Namespaces[dstNS] && !scope.Namespaces[srcNS] {
-				p.services.rememberPeer(channelID, link.GetSourceId())
+				p.services.RememberPeer(channelID, link.GetSourceId())
 			}
 		}
 	}
@@ -216,9 +219,9 @@ func (p *Proxy) filterServiceMapStream(channelID string, body []byte, scope Scop
 		e, ok := p.eventVisible(channelID, ev, scope)
 		if ok {
 			kept = append(kept, e)
-			eventsTotal.WithLabelValues(eventKind(ev), "kept").Inc()
+			metrics.EventsTotal.WithLabelValues(eventKind(ev), "kept").Inc()
 		} else {
-			eventsTotal.WithLabelValues(eventKind(ev), "dropped").Inc()
+			metrics.EventsTotal.WithLabelValues(eventKind(ev), "dropped").Inc()
 		}
 	}
 	resp.Events = kept
@@ -249,7 +252,7 @@ func eventKind(ev *uipb.Event) string {
 
 // eventVisible decides a single service-map event. The returned event may be a
 // trimmed copy (for batched flows); ok=false means drop it entirely.
-func (p *Proxy) eventVisible(channelID string, ev *uipb.Event, scope Scope) (*uipb.Event, bool) {
+func (p *Proxy) eventVisible(channelID string, ev *uipb.Event, scope authz.Scope) (*uipb.Event, bool) {
 	allowed, both := scope.Namespaces, p.requireBoth
 
 	switch e := ev.GetEvent().(type) {
@@ -279,12 +282,12 @@ func (p *Proxy) eventVisible(channelID string, ev *uipb.Event, scope Scope) (*ui
 			return ev, true
 		}
 		// A peer of something in scope: see the peer-learning pass above.
-		return ev, !both && p.services.isPeer(channelID, svc.GetId())
+		return ev, !both && p.services.IsPeer(channelID, svc.GetId())
 
 	case *uipb.Event_ServiceLinkState:
 		link := e.ServiceLinkState.GetServiceLink()
-		srcNS, srcKnown := p.services.lookup(channelID, link.GetSourceId())
-		dstNS, dstKnown := p.services.lookup(channelID, link.GetDestinationId())
+		srcNS, srcKnown := p.services.Lookup(channelID, link.GetSourceId())
+		dstNS, dstKnown := p.services.Lookup(channelID, link.GetDestinationId())
 		if !srcKnown || !dstKnown {
 			// An endpoint we have never seen announced could be in any
 			// namespace, so we cannot prove the caller may see this edge.

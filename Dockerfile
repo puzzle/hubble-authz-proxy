@@ -23,7 +23,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags "-s -w -X main.version=${OCI_VERSION}" \
-    -o /out/hubble-authz-proxy .
+    -o /out/hubble-authz-proxy ./cmd/hubble-authz-proxy
 
 FROM gcr.io/distroless/static-debian12:nonroot
 

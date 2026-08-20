@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"bytes"
@@ -15,6 +15,10 @@ import (
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/puzzle/hubble-authz-proxy/internal/authz"
+	"github.com/puzzle/hubble-authz-proxy/internal/identity"
+	"github.com/puzzle/hubble-authz-proxy/internal/metrics"
+	"github.com/puzzle/hubble-authz-proxy/internal/registry"
 )
 
 // Proxy is an HTTP reverse proxy that sits between the hubble-ui frontend
@@ -31,11 +35,11 @@ import (
 // sends back is filtered against their namespace set before it reaches them.
 type Proxy struct {
 	rp          *httputil.ReverseProxy
-	authz       Authorizer
-	services    *serviceRegistry
+	authz       authz.Authorizer
+	services    *registry.Registry
 	requireBoth bool
 	apiPrefix   string
-	headers     identityHeaders
+	headers     identity.Headers
 	log         *slog.Logger
 	maxResponse int64
 	// notifyEmptyScope turns the "you can see nothing" notice on. It is a flag
@@ -58,19 +62,20 @@ const reqInfoCtxKey ctxKey = iota
 // must not have its response served.
 type reqInfo struct {
 	filtered bool
-	scope    Scope
+	scope    authz.Scope
 	// id is carried so the empty-scope notification can name the identity the
 	// proxy actually saw. That is the whole diagnostic value of it: "no
 	// namespaces are visible to bob@example.com" tells an admin which subject to
 	// map, where "you see nothing" starts a support thread.
-	id Identity
+	id identity.Identity
 }
 
 // errResponseTooLarge is a limit being hit, not an upstream fault, and is
 // classified separately so the two can be told apart in metrics.
 var errResponseTooLarge = errors.New("backend response exceeds --max-response-bytes")
 
-func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefix string, requireBoth bool, identityPrefix string, maxResponse int64, notifyEmptyScope bool, logger *slog.Logger) *Proxy {
+// New builds a Proxy relaying to backend and filtering its responses.
+func New(backend *url.URL, authz authz.Authorizer, reg *registry.Registry, apiPrefix string, requireBoth bool, identityPrefix string, maxResponse int64, notifyEmptyScope bool, logger *slog.Logger) *Proxy {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -79,7 +84,7 @@ func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefi
 		services:         reg,
 		requireBoth:      requireBoth,
 		apiPrefix:        apiPrefix,
-		headers:          newIdentityHeaders(identityPrefix),
+		headers:          identity.NewHeaders(identityPrefix),
 		log:              logger,
 		maxResponse:      maxResponse,
 		notifyEmptyScope: notifyEmptyScope,
@@ -102,21 +107,21 @@ func NewProxy(backend *url.URL, authz Authorizer, reg *serviceRegistry, apiPrefi
 				// The caller left; there is nobody to send a status to. Counted
 				// rather than dropped: the rate matters even though any single
 				// occurrence is unremarkable. See clientGone.
-				requestsTotal.WithLabelValues(route, outcomeClientGone).Inc()
+				metrics.RequestsTotal.WithLabelValues(route, metrics.OutcomeClientGone).Inc()
 				p.log.Debug("client disconnected before the response completed",
 					"route", route, "path", r.URL.Path, "err", err)
 				return
 			}
 
 			if errors.Is(err, errResponseTooLarge) {
-				requestsTotal.WithLabelValues(route, outcomeResponseTooLarge).Inc()
+				metrics.RequestsTotal.WithLabelValues(route, metrics.OutcomeResponseTooLarge).Inc()
 				p.log.Error("backend response too large to filter; refusing to serve it",
 					"route", route, "limit_bytes", p.maxResponse,
 					"hint", "raise --max-response-bytes if this is legitimate")
 				http.Error(w, "response too large", http.StatusBadGateway)
 				return
 			}
-			requestsTotal.WithLabelValues(route, outcomeUpstreamError).Inc()
+			metrics.RequestsTotal.WithLabelValues(route, metrics.OutcomeUpstreamError).Inc()
 			p.log.Error("refusing to serve response",
 				"route", route, "path", r.URL.Path, "err", err)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
@@ -129,7 +134,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Health checks and static assets are not namespace-bearing, and must not
 	// require an identity.
 	if !strings.HasPrefix(r.URL.Path, p.apiPrefix) {
-		requestsTotal.WithLabelValues(routeNone, outcomePassthrough).Inc()
+		metrics.RequestsTotal.WithLabelValues(metrics.RouteNone, metrics.OutcomePassthrough).Inc()
 		ctx := context.WithValue(r.Context(), reqInfoCtxKey, reqInfo{filtered: false})
 		p.rp.ServeHTTP(w, r.WithContext(ctx))
 		return
@@ -139,27 +144,27 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// name, which is only known once the response comes back. Bounded by
 	// knownRoute so a caller cannot blow up metric cardinality with random paths.
 	route := knownRoute(strings.TrimPrefix(r.URL.Path, p.apiPrefix))
-	timer := prometheus.NewTimer(requestDuration.WithLabelValues(route))
+	timer := prometheus.NewTimer(metrics.RequestDuration.WithLabelValues(route))
 	defer timer.ObserveDuration()
 
-	id, err := p.headers.from(r)
+	id, err := p.headers.From(r)
 	if err != nil {
-		requestsTotal.WithLabelValues(route, outcomeUnauthenticated).Inc()
+		metrics.RequestsTotal.WithLabelValues(route, metrics.OutcomeUnauthenticated).Inc()
 		// Name the headers rather than the values, and say explicitly when the
 		// other family is present: a prefix mismatch otherwise looks exactly
 		// like an authenticator that is not running at all.
 		p.log.Warn("no identity on request",
 			"route", route,
-			"expecting", p.headers.email+" (and -User/-Groups)",
-			"present", p.headers.presentIn(r),
-			"other_family_present", p.headers.otherFamilyIn(r))
+			"expecting", p.headers.Expecting(),
+			"present", p.headers.PresentIn(r),
+			"other_family_present", p.headers.OtherFamilyIn(r))
 		http.Error(w, "unauthenticated", http.StatusUnauthorized)
 		return
 	}
 
 	scope, err := p.authz.AllowedNamespaces(r.Context(), id)
 	if err != nil {
-		requestsTotal.WithLabelValues(route, outcomeAuthzError).Inc()
+		metrics.RequestsTotal.WithLabelValues(route, metrics.OutcomeAuthzError).Inc()
 		if clientGone(err) {
 			p.log.Debug("caller left while their scope was being resolved",
 				"route", route, "user", id.Email)
@@ -180,7 +185,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"unrestricted", scope.All,
 		"namespaces", len(scope.Namespaces))
 
-	requestsTotal.WithLabelValues(route, outcomeFiltered).Inc()
+	metrics.RequestsTotal.WithLabelValues(route, metrics.OutcomeFiltered).Inc()
 	ctx := context.WithValue(r.Context(), reqInfoCtxKey, reqInfo{filtered: true, scope: scope, id: id})
 	p.rp.ServeHTTP(w, r.WithContext(ctx))
 }
@@ -259,4 +264,22 @@ func (p *Proxy) filterResponse(resp *http.Response) error {
 	resp.ContentLength = int64(len(out))
 	resp.Header.Set("Content-Length", strconv.Itoa(len(out)))
 	return nil
+}
+
+// clientGone reports whether an error is the caller having disconnected rather
+// than the upstream having failed.
+//
+// The UI long-polls, so a page reload, a navigation or a namespace switch aborts
+// several in-flight requests at once; ReverseProxy surfaces each through
+// ErrorHandler. Reporting those identically to upstream failures makes both
+// useless: one reload looks like three outages, and a real outage looks like a
+// reload.
+//
+// This is a classification, not a reason to ignore them: a rising rate of
+// client_gone points at something upstream stalling callers. Individual
+// occurrences go to debug to keep per-request noise down; the counter is what
+// you alert on.
+func clientGone(err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, http.ErrAbortHandler)
 }

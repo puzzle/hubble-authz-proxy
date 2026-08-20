@@ -1,12 +1,13 @@
-package main
+package authz
 
 import (
 	"context"
-	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/puzzle/hubble-authz-proxy/internal/identity"
 )
 
 const testMapping = `
@@ -42,47 +43,47 @@ func TestStaticAuthorizer(t *testing.T) {
 
 	tests := []struct {
 		name    string
-		id      Identity
+		id      identity.Identity
 		wantAll bool
 		wantNS  []string
 	}{
 		{
 			name:    "admin by group",
-			id:      Identity{Email: "carol@example.com", Groups: []string{"platform-admins"}},
+			id:      identity.Identity{Email: "carol@example.com", Groups: []string{"platform-admins"}},
 			wantAll: true,
 		},
 		{
 			name:    "admin by email",
-			id:      Identity{Email: "alice@example.com"},
+			id:      identity.Identity{Email: "alice@example.com"},
 			wantAll: true,
 		},
 		{
 			name:   "group grant",
-			id:     Identity{Email: "dave@example.com", Groups: []string{"team-payments"}},
+			id:     identity.Identity{Email: "dave@example.com", Groups: []string{"team-payments"}},
 			wantNS: []string{"payments", "payments-staging"},
 		},
 		{
 			name:   "union of two groups",
-			id:     Identity{Email: "eve@example.com", Groups: []string{"team-payments", "team-search"}},
+			id:     identity.Identity{Email: "eve@example.com", Groups: []string{"team-payments", "team-search"}},
 			wantNS: []string{"payments", "payments-staging", "search"},
 		},
 		{
 			name:   "per-user grant unions with group grant",
-			id:     Identity{Email: "bob@example.com", Groups: []string{"team-search"}},
+			id:     identity.Identity{Email: "bob@example.com", Groups: []string{"team-search"}},
 			wantNS: []string{"sandbox-bob", "search"},
 		},
 		{
 			// The important negative: an unknown caller gets an empty scope, not a
 			// wide one, and is not silently promoted to admin.
 			name:   "unknown identity gets nothing",
-			id:     Identity{Email: "mallory@example.com", Groups: []string{"not-a-real-group"}},
+			id:     identity.Identity{Email: "mallory@example.com", Groups: []string{"not-a-real-group"}},
 			wantNS: nil,
 		},
 		{
 			// An identity with no user/email must not match admin entries via the
 			// empty string.
 			name:   "empty identity gets nothing",
-			id:     Identity{},
+			id:     identity.Identity{},
 			wantNS: nil,
 		},
 	}
@@ -111,113 +112,6 @@ func TestStaticAuthorizer(t *testing.T) {
 	}
 }
 
-func TestIdentityFromRequest(t *testing.T) {
-	newReq := func(h http.Header) *http.Request {
-		r, err := http.NewRequest(http.MethodPost, "http://x/api/control-stream", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		r.Header = h
-		return r
-	}
-
-	t.Run("no identity headers is rejected", func(t *testing.T) {
-		if _, err := newIdentityHeaders(AuthRequestPrefix).from(newReq(http.Header{})); err == nil {
-			t.Error("want error when oauth2-proxy headers are absent")
-		}
-	})
-
-	t.Run("comma-separated groups", func(t *testing.T) {
-		id, err := newIdentityHeaders(AuthRequestPrefix).from(newReq(http.Header{
-			"X-Auth-Request-User":   {"bob"},
-			"X-Auth-Request-Email":  {"bob@example.com"},
-			"X-Auth-Request-Groups": {"team-payments, team-search"},
-		}))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if id.User != "bob" || id.Email != "bob@example.com" {
-			t.Errorf("got %+v", id)
-		}
-		// oauth2-proxy pads with spaces after commas; those must not become part
-		// of the group name or every mapping lookup silently misses.
-		if len(id.Groups) != 2 || id.Groups[0] != "team-payments" || id.Groups[1] != "team-search" {
-			t.Errorf("groups = %q, want [team-payments team-search]", id.Groups)
-		}
-	})
-
-	t.Run("repeated group headers", func(t *testing.T) {
-		id, err := newIdentityHeaders(AuthRequestPrefix).from(newReq(http.Header{
-			"X-Auth-Request-Email":  {"bob@example.com"},
-			"X-Auth-Request-Groups": {"team-payments", "team-search"},
-		}))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(id.Groups) != 2 {
-			t.Errorf("groups = %q, want 2 entries", id.Groups)
-		}
-	})
-
-	t.Run("email alone is enough", func(t *testing.T) {
-		_, err := newIdentityHeaders(AuthRequestPrefix).from(newReq(http.Header{
-			"X-Auth-Request-Email": {"bob@example.com"},
-		}))
-		if err != nil {
-			t.Errorf("unexpected error: %v", err)
-		}
-	})
-}
-
-// oauth2-proxy presents the identity in a different header family depending on
-// how it is deployed: X-Auth-Request-* when something else (nginx auth_request,
-// Traefik forwardAuth) does the subrequest, X-Forwarded-* when oauth2-proxy is
-// itself the reverse proxy, as in the sidecar setup. Both suffixes match, so a
-// prefix selects between them.
-func TestIdentityHeaderFamilies(t *testing.T) {
-	newReq := func(h http.Header) *http.Request {
-		r, err := http.NewRequest(http.MethodPost, "http://x/api/control-stream", nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-		r.Header = h
-		return r
-	}
-
-	forwarded := http.Header{
-		"X-Forwarded-Email":  {"bob@example.com"},
-		"X-Forwarded-Groups": {"team-a,team-b"},
-	}
-
-	t.Run("forwarded prefix reads them", func(t *testing.T) {
-		id, err := newIdentityHeaders(ForwardedPrefix).from(newReq(forwarded))
-		if err != nil {
-			t.Fatal(err)
-		}
-		if id.Email != "bob@example.com" || len(id.Groups) != 2 {
-			t.Errorf("got %+v", id)
-		}
-	})
-
-	// The default must NOT read X-Forwarded-*. That family is set by all kinds of
-	// intermediaries, so trusting it has to be a deliberate configuration choice
-	// rather than something that happens to work.
-	t.Run("default ignores forwarded headers", func(t *testing.T) {
-		if _, err := newIdentityHeaders(AuthRequestPrefix).from(newReq(forwarded)); err == nil {
-			t.Error("X-Forwarded-* was accepted by the X-Auth-Request default")
-		}
-	})
-
-	t.Run("a trailing dash in the prefix is tolerated", func(t *testing.T) {
-		id, err := newIdentityHeaders("X-Forwarded-").from(newReq(forwarded))
-		if err != nil || id.Email != "bob@example.com" {
-			t.Errorf("got %+v, %v", id, err)
-		}
-	})
-}
-
-// --- hot reload -------------------------------------------------------------
-
 // writeMapping replaces the file the way an editor or kubelet would, rather than
 // appending, so the authorizer sees a whole new document.
 func writeMapping(t *testing.T, path, content string) {
@@ -238,7 +132,7 @@ func newReloadableAuthorizer(t *testing.T, content string) (*StaticAuthorizer, s
 	return a, path
 }
 
-func nsOf(t *testing.T, a *StaticAuthorizer, id Identity) map[string]bool {
+func nsOf(t *testing.T, a *StaticAuthorizer, id identity.Identity) map[string]bool {
 	t.Helper()
 	scope, err := a.AllowedNamespaces(context.Background(), id)
 	if err != nil {
@@ -256,7 +150,7 @@ groupToNamespaces:
   team-payments:
     - payments
 `)
-	id := Identity{Email: "bob@example.com", Groups: []string{"team-payments"}}
+	id := identity.Identity{Email: "bob@example.com", Groups: []string{"team-payments"}}
 
 	if ns := nsOf(t, a, id); !ns["payments"] || ns["search"] {
 		t.Fatalf("initial scope wrong: %v", ns)
@@ -290,8 +184,8 @@ groupToNamespaces:
   team-payments:
     - payments
 `)
-	alice := Identity{Email: "alice@example.com"}
-	bob := Identity{Email: "bob@example.com", Groups: []string{"team-payments"}}
+	alice := identity.Identity{Email: "alice@example.com"}
+	bob := identity.Identity{Email: "bob@example.com", Groups: []string{"team-payments"}}
 
 	if scope, _ := a.AllowedNamespaces(context.Background(), alice); !scope.All {
 		t.Fatal("alice did not start as an admin")
@@ -319,7 +213,7 @@ groupToNamespaces:
   team-payments:
     - payments
 `)
-	id := Identity{Groups: []string{"team-payments"}}
+	id := identity.Identity{Groups: []string{"team-payments"}}
 
 	writeMapping(t, path, "groupToNamespaces: [this is not: a map")
 	changed, err := a.reload()
@@ -354,7 +248,7 @@ groupToNamespaces:
   team-payments:
     - payments
 `)
-	id := Identity{Groups: []string{"team-payments"}}
+	id := identity.Identity{Groups: []string{"team-payments"}}
 
 	if err := os.Remove(path); err != nil {
 		t.Fatal(err)
@@ -402,7 +296,7 @@ groupToNamespaces:
   team-payments:
     - payments
 `)
-	id := Identity{Groups: []string{"team-payments"}}
+	id := identity.Identity{Groups: []string{"team-payments"}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

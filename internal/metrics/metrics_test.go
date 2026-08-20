@@ -1,4 +1,4 @@
-package main
+package metrics
 
 import (
 	"io"
@@ -6,53 +6,17 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
-
-	uipb "github.com/cilium/hubble-ui/backend/proto/ui"
 )
 
-// Metric labels must come from a fixed set. Both of these derive from
-// caller-reachable input, so an unbounded mapping would let anyone who can
-// reach the proxy exhaust its memory with unique time series.
-func TestMetricLabelsAreBounded(t *testing.T) {
-	t.Run("route", func(t *testing.T) {
-		cases := map[string]string{
-			"/control-stream":               routeControlStream,
-			"control-stream":                routeControlStream,
-			"/service-map-stream":           routeServiceMapStre,
-			"/../../etc/passwd":             "other",
-			"/" + strings.Repeat("x", 4096): "other",
-			"":                              "other",
-		}
-		for in, want := range cases {
-			if got := knownRoute(in); got != want {
-				t.Errorf("knownRoute(%.20q) = %q, want %q", in, got, want)
-			}
-		}
-	})
-
-	t.Run("event kind", func(t *testing.T) {
-		cases := []struct {
-			ev   *uipb.Event
-			want string
-		}{
-			{&uipb.Event{Event: &uipb.Event_Flow{}}, "flow"},
-			{&uipb.Event{Event: &uipb.Event_Flows{}}, "flows"},
-			{&uipb.Event{Event: &uipb.Event_NamespaceState{}}, "namespace_state"},
-			{&uipb.Event{Event: &uipb.Event_ServiceState{}}, "service_state"},
-			{&uipb.Event{Event: &uipb.Event_ServiceLinkState{}}, "service_link_state"},
-			{&uipb.Event{Event: &uipb.Event_Notification{}}, "notification"},
-			{&uipb.Event{}, "unknown"},
-		}
-		for _, tc := range cases {
-			if got := eventKind(tc.ev); got != tc.want {
-				t.Errorf("eventKind = %q, want %q", got, tc.want)
-			}
-		}
-	})
-}
+// testRoutes stands in for the real route list, which belongs to the component
+// that dispatches on it (internal/proxy) and cannot be imported here without
+// recreating the cycle NewRegistry's parameters exist to break. What this file
+// verifies is that NewRegistry pre-initialises whatever routes it is handed;
+// that the real list is complete is asserted proxy-side, next to knownRoute.
+var testRoutes = []string{"control-stream", "service-map-stream", "other"}
 
 func TestMetricsHandler(t *testing.T) {
-	srv := httptest.NewServer(metricsHandler(metricsRegistry("test", knownRoutes)))
+	srv := httptest.NewServer(Handler(NewRegistry("test", testRoutes)))
 	t.Cleanup(srv.Close)
 
 	t.Run("metrics", func(t *testing.T) {
@@ -100,7 +64,7 @@ func TestMetricsHandler(t *testing.T) {
 // exact moment you would have wanted the alert to already exist. client_gone
 // and upstream_error shipped that way, which is what this guards.
 func TestEveryOutcomeIsPreInitialised(t *testing.T) {
-	reg := metricsRegistry("test", knownRoutes)
+	reg := NewRegistry("test", testRoutes)
 	families, err := reg.Gather()
 	if err != nil {
 		t.Fatal(err)
@@ -131,15 +95,15 @@ func TestEveryOutcomeIsPreInitialised(t *testing.T) {
 		t.Fatal("hubble_authz_requests_total was not exported at all")
 	}
 
-	for _, route := range knownRoutes {
-		for _, outcome := range requestOutcomes {
+	for _, route := range testRoutes {
+		for _, outcome := range RequestOutcomes {
 			if !seen[route][outcome] {
 				t.Errorf("route=%q outcome=%q is never exported; an alert on it "+
 					"would return no data until the first occurrence", route, outcome)
 			}
 		}
 	}
-	if !seen[routeNone][outcomePassthrough] {
-		t.Errorf("route=%q outcome=%q is never exported", routeNone, outcomePassthrough)
+	if !seen[RouteNone][OutcomePassthrough] {
+		t.Errorf("route=%q outcome=%q is never exported", RouteNone, OutcomePassthrough)
 	}
 }

@@ -1,12 +1,18 @@
-package main
+// Package registry remembers, per client channel, which namespace each service
+// ID belongs to. ui.ServiceLink names its endpoints by opaque ID and carries no
+// namespace, so an edge can only be resolved against announcements seen earlier
+// on the same channel.
+package registry
 
 import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/puzzle/hubble-authz-proxy/internal/metrics"
 )
 
-// serviceRegistry remembers which namespace each service map node belongs to.
+// Registry remembers which namespace each service map node belongs to.
 //
 // It exists because ui.ServiceLink identifies its endpoints by opaque service
 // ID (source_id / destination_id) and carries no namespace of its own. The only
@@ -26,7 +32,7 @@ import (
 // abandoned session for the whole idle period. That is the same unbounded-growth
 // shape as reading a response body without a limit, and the same failure:
 // an OOMKill that takes Hubble UI down for everyone.
-type serviceRegistry struct {
+type Registry struct {
 	ttl         time.Duration
 	maxChannels int
 	now         func() time.Time
@@ -35,9 +41,9 @@ type serviceRegistry struct {
 	channels map[string]*channelServices
 }
 
-// defaultMaxChannels is generous next to real use — one channel per active
+// DefaultMaxChannels is generous next to real use — one channel per active
 // browser tab — while still capping worst-case memory at a few tens of MB.
-const defaultMaxChannels = 1024
+const DefaultMaxChannels = 1024
 
 type channelServices struct {
 	lastSeen   time.Time
@@ -54,17 +60,21 @@ type channelServices struct {
 	emptyScopeNotified bool
 }
 
-func newServiceRegistry(ttl time.Duration) *serviceRegistry {
-	return &serviceRegistry{
+// New builds a registry holding per-channel state for ttl. maxChannels caps how
+// many channels are tracked before the least recently used is dropped; 0 or less
+// disables the cap entirely (see makeRoomLocked), which is what --max-channels=0
+// selects. Callers wanting the default pass DefaultMaxChannels explicitly.
+func New(ttl time.Duration, maxChannels int) *Registry {
+	return &Registry{
 		ttl:         ttl,
-		maxChannels: defaultMaxChannels,
+		maxChannels: maxChannels,
 		now:         time.Now,
 		channels:    map[string]*channelServices{},
 	}
 }
 
-// remember records a service ID's namespace for this channel.
-func (r *serviceRegistry) remember(channelID, serviceID, namespace string) {
+// Remember records a service ID's namespace for this channel.
+func (r *Registry) Remember(channelID, serviceID, namespace string) {
 	if channelID == "" || serviceID == "" {
 		return
 	}
@@ -78,7 +88,7 @@ func (r *serviceRegistry) remember(channelID, serviceID, namespace string) {
 
 // channelLocked returns the channel's state, creating it if needed. Caller holds
 // r.mu.
-func (r *serviceRegistry) channelLocked(channelID string) *channelServices {
+func (r *Registry) channelLocked(channelID string) *channelServices {
 	ch := r.channels[channelID]
 	if ch == nil {
 		r.makeRoomLocked()
@@ -87,7 +97,7 @@ func (r *serviceRegistry) channelLocked(channelID string) *channelServices {
 			peers:      map[string]bool{},
 		}
 		r.channels[channelID] = ch
-		trackedChannels.Set(float64(len(r.channels)))
+		metrics.TrackedChannels.Set(float64(len(r.channels)))
 	}
 	return ch
 }
@@ -103,7 +113,7 @@ func (r *serviceRegistry) channelLocked(channelID string) *channelServices {
 // the right trade against an OOMKill, and it is why the eviction is counted —
 // a nonzero rate means --max-channels is too low for the number of concurrent
 // sessions, not that anything is wrong with the filter.
-func (r *serviceRegistry) makeRoomLocked() {
+func (r *Registry) makeRoomLocked() {
 	if r.maxChannels <= 0 || len(r.channels) < r.maxChannels {
 		return
 	}
@@ -130,13 +140,13 @@ func (r *serviceRegistry) makeRoomLocked() {
 			return
 		}
 		delete(r.channels, oldestID)
-		channelEvictionsTotal.Inc()
+		metrics.ChannelEvictionsTotal.Inc()
 	}
 }
 
-// rememberPeer records a service the caller may see because it is linked to one
+// RememberPeer records a service the caller may see because it is linked to one
 // inside their scope, even though its own namespace is not.
-func (r *serviceRegistry) rememberPeer(channelID, serviceID string) {
+func (r *Registry) RememberPeer(channelID, serviceID string) {
 	if channelID == "" || serviceID == "" {
 		return
 	}
@@ -148,14 +158,14 @@ func (r *serviceRegistry) rememberPeer(channelID, serviceID string) {
 	ch.peers[serviceID] = true
 }
 
-// markEmptyScopeNotified reports whether this channel still needs to be told
+// MarkEmptyScopeNotified reports whether this channel still needs to be told
 // that its caller can see nothing, and records that it has been.
 //
 // Returns true exactly once per channel. A channel evicted under --max-channels
 // and then seen again is told a second time, which is the right side to err on:
 // repeating a warning is a nuisance, never showing it is the bug this exists to
 // fix.
-func (r *serviceRegistry) markEmptyScopeNotified(channelID string) bool {
+func (r *Registry) MarkEmptyScopeNotified(channelID string) bool {
 	if channelID == "" {
 		// No channel to remember against, so sending it every poll would spam.
 		// The UI always supplies one past the first response.
@@ -173,9 +183,9 @@ func (r *serviceRegistry) markEmptyScopeNotified(channelID string) bool {
 	return true
 }
 
-// isPeer reports whether this service was recorded as linked to the caller's
+// IsPeer reports whether this service was recorded as linked to the caller's
 // scope on this channel.
-func (r *serviceRegistry) isPeer(channelID, serviceID string) bool {
+func (r *Registry) IsPeer(channelID, serviceID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -186,11 +196,11 @@ func (r *serviceRegistry) isPeer(channelID, serviceID string) bool {
 	return ch.peers[serviceID]
 }
 
-// lookup returns the namespace recorded for a service ID. The second result
+// Lookup returns the namespace recorded for a service ID. The second result
 // distinguishes "known to live in no namespace" (world, reserved) from "never
 // announced on this channel" — callers must fail closed on the latter, since an
 // unknown endpoint could be anywhere.
-func (r *serviceRegistry) lookup(channelID, serviceID string) (string, bool) {
+func (r *Registry) Lookup(channelID, serviceID string) (string, bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -204,7 +214,7 @@ func (r *serviceRegistry) lookup(channelID, serviceID string) (string, bool) {
 }
 
 // sweep drops channels that have been idle for longer than the TTL.
-func (r *serviceRegistry) sweep() {
+func (r *Registry) sweep() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -214,11 +224,11 @@ func (r *serviceRegistry) sweep() {
 			delete(r.channels, id)
 		}
 	}
-	trackedChannels.Set(float64(len(r.channels)))
+	metrics.TrackedChannels.Set(float64(len(r.channels)))
 }
 
 // RunSweeper sweeps periodically until ctx is cancelled.
-func (r *serviceRegistry) RunSweeper(ctx context.Context) {
+func (r *Registry) RunSweeper(ctx context.Context) {
 	t := time.NewTicker(r.ttl)
 	defer t.Stop()
 	for {

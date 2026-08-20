@@ -1,4 +1,4 @@
-package main
+package proxy
 
 import (
 	"bytes"
@@ -13,22 +13,25 @@ import (
 
 	cppb "github.com/cilium/hubble-ui/backend/proto/customprotocol"
 	uipb "github.com/cilium/hubble-ui/backend/proto/ui"
+	"github.com/puzzle/hubble-authz-proxy/internal/authz"
+	"github.com/puzzle/hubble-authz-proxy/internal/identity"
+	"github.com/puzzle/hubble-authz-proxy/internal/registry"
 	"google.golang.org/protobuf/proto"
 )
 
 // fakeAuthorizer avoids needing a mapping file or a cluster.
 type fakeAuthorizer struct {
-	scope Scope
+	scope authz.Scope
 	err   error
 }
 
-func (f fakeAuthorizer) AllowedNamespaces(context.Context, Identity) (Scope, error) {
+func (f fakeAuthorizer) AllowedNamespaces(context.Context, identity.Identity) (authz.Scope, error) {
 	return f.scope, f.err
 }
 
 // newStack wires the proxy in front of a stub backend that answers every POST
 // with the given envelope, encoded the way the real backend would.
-func newStack(t *testing.T, authz Authorizer, requireBoth bool, msg *cppb.Message, asJSON bool) *httptest.Server {
+func newStack(t *testing.T, authz authz.Authorizer, requireBoth bool, msg *cppb.Message, asJSON bool) *httptest.Server {
 	t.Helper()
 
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -51,7 +54,7 @@ func newStack(t *testing.T, authz Authorizer, requireBoth bool, msg *cppb.Messag
 	if err != nil {
 		t.Fatal(err)
 	}
-	front := httptest.NewServer(NewProxy(u, authz, newServiceRegistry(time.Minute), "/api", requireBoth, AuthRequestPrefix, testMaxResponse, true, testLogger()))
+	front := httptest.NewServer(New(u, authz, registry.New(time.Minute, registry.DefaultMaxChannels), "/api", requireBoth, identity.AuthRequestPrefix, testMaxResponse, true, testLogger()))
 	t.Cleanup(front.Close)
 	return front
 }
@@ -165,7 +168,7 @@ func TestEndToEndRewritesContentLength(t *testing.T) {
 }
 
 func TestEndToEndAdminBypassesFiltering(t *testing.T) {
-	authz := fakeAuthorizer{scope: Scope{All: true}}
+	authz := fakeAuthorizer{scope: authz.Scope{All: true}}
 	srv := newStack(t, authz, false,
 		envelopeWith(routeControlStream, threeNamespaces()), false)
 
@@ -264,8 +267,8 @@ func TestNonAPIPathsPassThrough(t *testing.T) {
 	t.Cleanup(backend.Close)
 	u, _ := url.Parse(backend.URL)
 
-	front := httptest.NewServer(NewProxy(u, fakeAuthorizer{scope: scopeOf("payments")},
-		newServiceRegistry(time.Minute), "/api", false, AuthRequestPrefix, testMaxResponse, true, testLogger()))
+	front := httptest.NewServer(New(u, fakeAuthorizer{scope: scopeOf("payments")},
+		registry.New(time.Minute, registry.DefaultMaxChannels), "/api", false, identity.AuthRequestPrefix, testMaxResponse, true, testLogger()))
 	t.Cleanup(front.Close)
 
 	resp := post(t, front, "/healthz", nil)
@@ -328,8 +331,8 @@ func newStackLimited(t *testing.T, maxResponse int64, bodyBytes int) *httptest.S
 	if err != nil {
 		t.Fatal(err)
 	}
-	front := httptest.NewServer(NewProxy(u, fakeAuthorizer{scope: scopeOf("payments")},
-		newServiceRegistry(time.Minute), "/api", false, AuthRequestPrefix, maxResponse, true, testLogger()))
+	front := httptest.NewServer(New(u, fakeAuthorizer{scope: scopeOf("payments")},
+		registry.New(time.Minute, registry.DefaultMaxChannels), "/api", false, identity.AuthRequestPrefix, maxResponse, true, testLogger()))
 	t.Cleanup(front.Close)
 	return front
 }
