@@ -488,6 +488,13 @@ never a match on its own.
 
 ### Flags
 
+Only the double-dash form is accepted (`--rbac-ttl=60s`, not `-rbac-ttl=60s`) —
+the CLI is built on [cobra](https://github.com/spf13/cobra)/pflag, which parses
+a single-dash multi-letter argument as a cluster of shorthand flags rather than
+a long name. The Helm chart already renders every arg with `--`, so an install
+via the chart is unaffected; a hand-written manifest using single-dash flags
+needs updating.
+
 | Flag | Default | Meaning |
 | --- | --- | --- |
 | `--listen` | `:8090` | Listen address |
