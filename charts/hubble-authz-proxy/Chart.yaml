@@ -2,8 +2,8 @@ apiVersion: v2
 name: hubble-authz-proxy
 description: Namespace-scoped authorization proxy for the Hubble UI
 type: application
-version: 0.6.0
-appVersion: 0.6.0
+version: 1.0.0
+appVersion: 1.0.0
 icon: >-
   https://raw.githubusercontent.com/puzzle/hubble-authz-proxy/main/doc/images/hubble-authz-proxy-mark.png
 home: https://github.com/puzzle/hubble-authz-proxy

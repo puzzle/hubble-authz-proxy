@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.0.0](https://github.com/puzzle/hubble-authz-proxy/compare/v0.6.0...v1.0.0) (2026-08-21)
+
+
+### ⚠ BREAKING CHANGES
+
+* only the double-dash long-flag form is accepted now (--rbac-ttl=60s), not the single-dash form the stdlib flag package also allowed (-rbac-ttl=60s). pflag parses a single-dash multi-letter argument as a cluster of shorthand flags, so the old form now fails loudly ("unknown shorthand flag") rather than working silently. The Helm chart already renders every arg with --, so an install through the chart is unaffected; a hand-written manifest using single-dash flags needs updating. Documented in the README next to the flags table.
+
+### Features
+
+* evict a cached scope when RBAC changes, not when the TTL expires ([#24](https://github.com/puzzle/hubble-authz-proxy/issues/24)) ([ed35385](https://github.com/puzzle/hubble-authz-proxy/commit/ed353851a3d97621134891fbf816f8a6c5868301))
+* switch the CLI from flag to cobra ([#33](https://github.com/puzzle/hubble-authz-proxy/issues/33)) ([9d960d4](https://github.com/puzzle/hubble-authz-proxy/commit/9d960d4af12a636977a9e08ba941697a34332238))
+
 ## [0.6.0](https://github.com/splattner/hubble-authz-proxy/compare/v0.5.1...v0.6.0) (2026-08-13)
 
 
