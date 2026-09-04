@@ -13,7 +13,7 @@ go 1.26.2
 // image you deploy, and let the compiler tell you what the upgrade changed.
 require (
 	github.com/cilium/cilium v1.19.6
-	google.golang.org/grpc v1.82.1 // indirect
+	google.golang.org/grpc v1.83.1 // indirect
 	k8s.io/api v0.36.1
 	k8s.io/apimachinery v0.36.1
 	k8s.io/client-go v0.36.1
