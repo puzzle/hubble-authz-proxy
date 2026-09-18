@@ -42,8 +42,10 @@ jobs:
                 # support window is a decision. TestE2EMatrixCoversDefaultPin
                 # fails if the two drift apart.
                 include:
+                    - ui: v0.13.6
+                      covers: Cilium 1.18.14+, 1.19.8+, 1.20.2+ - newest in the field
                     - ui: v0.13.5
-                      covers: Cilium 1.18.10+, 1.19.4+, 1.20.x, 1.21 (pre) - matches the go.mod pin
+                      covers: Cilium 1.18.10-1.18.13, 1.19.4-1.19.7, 1.20.0-1.20.1, 1.21 (pre) - matches the go.mod pin
                     - ui: v0.13.3
                       covers: Cilium <=1.17.x, 1.18.0-1.18.9, 1.19.0-1.19.3
         steps:
